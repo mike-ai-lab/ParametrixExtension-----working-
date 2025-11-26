@@ -1,0 +1,1777 @@
+Chat Title: File Attached
+Date: 10/24/2025, 11:27:56 PM
+
+---
+
+[USER @ 12:35:59 AM]
+
+
+[MODEL @ 12:35:59 AM]
+This is an impressive and sophisticated SketchUp extension codebase! You've clearly invested a significant amount of thought and effort into handling complex scenarios like multi-face layouts, unit conversions, material management, and especially the challenging aspect of robust boolean trimming using the SketchUp API. Your use of randomization with synchronized seeds is a clever touch.
+
+As your SketchUp Extension Development Guru, I'll provide a thorough analysis, pointing out strengths, potential pitfalls, and actionable recommendations for improvement, following best practices for Ruby and the SketchUp API.
+
+Let's break it down by file and then provide overall architectural guidance.
+
+---
+
+## 1. Analysis of `core.rb`
+
+This module serves as the central hub for constants, configuration, and fundamental geometry analysis.
+
+### Strengths:
+
+*   **Comprehensive Geometry Analysis:** Functions like `analyze_multi_face_selection`, `detect_corner_type`, `get_face_transformation_matrix_user_logic`, `calculate_global_unified_bounds`, and `calculate_unified_start_position` demonstrate a deep understanding of SketchUp's geometric primitives and transformations. This is crucial for robust multi-face operations.
+*   **Unit Management:** The `get_unit_name`, `get_unit_conversion`, `get_effective_unit`, `get_effective_unit_conversion` methods are well-implemented and essential for creating cross-compatible extensions that respect user preferences.
+*   **Material Handling:** `create_materials` is clean and correctly handles adding materials if they don't exist.
+*   **Preview Mechanism:** `remove_preview` is a good pattern for managing temporary geometry during interactive previews.
+*   **Configuration Parsing:** `parse_multi_values` is a robust way to handle user input for multiple values.
+*   **Height Pattern Rotation:** `get_height_values_with_start_index` is a nice UX touch for controlling layout start.
+
+### Areas for Improvement / Feedback:
+
+1.  **Global/Class Variables (`@@`):**
+    *   **Persistence:** The most significant issue with `@@length`, `@@height`, `@@thickness`, etc., is that they are **not persistent** across SketchUp sessions. When a user closes and reopens SketchUp, all these settings will revert to their default values in `core.rb`. For a commercial or user-friendly extension, you **must** implement a mechanism to save and load these settings.
+        *   **Recommendation:** Use `Sketchup.write_default("PARAMETRIX_Extension", "setting_name", value)` and `Sketchup.read_default("PARAMETRIX_Extension", "setting_name", default_value)` for application-wide settings, or `Sketchup.active_model.attribute_dictionaries` for model-specific settings. A dedicated `Settings` module or class (see "Overall Architectural Guidance") would be ideal.
+    *   **Encapsulation:** While `@@` variables are common in SketchUp extensions, it's generally good practice to access them via public accessor methods (e.g., `self.length` instead of `@@length`) for better encapsulation and potential future validation/logic.
+
+2.  **Dead Code & Conflicting Logic (HIGH PRIORITY):**
+    *   The methods `filter_and_extend_pieces`, `generate_single_length_row_with_min_piece`, `generate_multi_length_row_with_min_piece`, `trim_piece_to_face_boundary`, `create_cutting_component_from_layout_NEW_METHOD`, and `oob_face_clone` in `core.rb` appear to be **unused or superseded**.
+    *   Your `layout_engine.rb` implements its own piece generation and minimum piece handling, and `trimming_v3.rb` handles the final boolean trimming.
+    *   **Recommendation:** Remove these unused methods from `core.rb` to reduce complexity and avoid confusion. The "NEW METHOD" in the function names suggests they were part of an older or alternative approach.
+
+3.  **`create_piece_with_ghosting`:**
+    *   **Robustness:** `face_element.pushpull` can fail if the face has internal holes or if it's not a planar quad. The `rescue` block is good, but consider adding a `UI.messagebox` in non-preview mode if a piece fails to be created/extruded, or using `face.reverse!` if the normal is incorrect before `pushpull`.
+    *   **Material Ghosting:** Using `"#[CCCCCC]"` is fine for a basic preview. For more advanced previews, you might use transparent materials or `Sketchup::View.draw_points` / `draw_lines` for even lighter weight ghosting.
+
+4.  **`detect_corner_type` Performance:**
+    *   This method iterates through `all_faces_data` for *each* face. If you have `N` faces, this is an `O(N^2)` operation. For models with many faces, this could become a performance bottleneck.
+    *   **Recommendation:** Consider pre-calculating all face normals and their transformed versions once. Then, when iterating to detect corner types, compare each face against this pre-calculated list. Alternatively, if a face only ever has a few neighbors, the constant factor for `N^2` might be small enough.
+
+5.  **`get_face_transformation_matrix_user_logic`:**
+    *   **Local Axis Selection:** The logic for selecting `x_axis` and `y_axis` when `@@force_horizontal_layout` is `false` (face-oriented) and `longest_edge` is `nil` (e.g., a circle) might lead to an arbitrary `x_axis`. For general curved faces, this might be unavoidable, but for planar faces, ensure a deterministic choice.
+    *   The `orientation` variable is calculated but not used.
+
+6.  **`create_rails_for_face`:**
+    *   **Clarity:** The logic for `rail_y_pos` and `pushpull_distance` is complex due to the various settings (`layout_start_direction`, `single_row_mode`, `original_normal`). Add comments to clarify the intent behind specific additions/subtractions of `joint_width_su` or `thickness_su`.
+    *   **Error Handling:** The `begin...rescue` inside the loop for `rail_face.pushpull` is good, but silently failing might hide issues. Consider logging a warning.
+
+7.  **`puts` Statements:** Many `puts` statements are used for debugging. For a production extension, these should be removed or wrapped within a conditional debug flag (e.g., `if @@debug_mode; puts "..."; end`).
+
+---
+
+## 2. Analysis of `layout_engine.rb`
+
+This module contains the heart of your layout generation logic, handling the iterative placement of pieces onto the analyzed faces.
+
+### Strengths:
+
+*   **Undo/Redo Support:** The correct use of `model.start_operation` and `model.commit_operation` (and `abort_operation`) is a fundamental best practice for SketchUp extensions and ensures user-friendly undo functionality.
+*   **Preview Mode Integration:** The `is_preview` flag is well-managed, allowing for temporary geometry creation without committing changes, which is great for interactive dialogs.
+*   **Conditional Parameter Selection:** Correctly switches between multi-row and single-row parameters (`@@single_row_length`, `@@single_row_height`, etc.).
+*   **Robust Defaults:** Provides fallback `length_values` and `height_values` if parsing fails, preventing crashes.
+*   **Pattern Synchronization:** The use of `@global_length_seed` and `@global_height_seed` with `srand` in conjunction with `@@synchronize_patterns` is an excellent approach to make "random" layouts consistent across multiple faces or rows.
+*   **Min-Piece Length Logic:** The "second pass" filtering and extension of `row_pieces` to satisfy `min_piece_su` requirements is a well-considered approach to avoid generating tiny, impractical pieces.
+*   **Trimming Integration:** Correctly delegates the final trimming to `PARAMETRIX_TRIMMING.boolean2d_exact`.
+
+### Areas for Improvement / Feedback:
+
+1.  **Complexity of `create_unified_layout_for_face` (HIGH PRIORITY):**
+    *   This method is very long and has high cyclomatic complexity, handling many different responsibilities (height pattern, row offset, piece generation, min-piece filtering, actual geometry creation, rail data collection).
+    *   **Recommendation:** Break this method down into several smaller, more focused helper methods. For example:
+        *   `calculate_row_height_for_face`
+        *   `generate_initial_row_pieces`
+        *   `apply_min_piece_constraint_to_row`
+        *   `create_geometry_for_piece`
+        *   `update_rail_bounds_for_piece`
+    *   This will significantly improve readability, maintainability, and testability.
+
+2.  **Redundant Global Position Parameters:**
+    *   `global_start_x`, `global_start_y`, `elements_x`, `elements_y` are passed into `create_unified_layout_for_face`, but then `face_elements_x`, `face_elements_y`, `face_start_x`, `face_start_y` are recalculated based on `face_local_bounds`.
+    *   **Recommendation:** Re-evaluate if `global_start_x`, `global_start_y` are truly necessary *within* `create_unified_layout_for_face`. It seems each face's layout is independently calculated based on its *local bounds*. This might simplify the parameter list and clarify intent. The outer loop of `create_multi_face_unified_layout` correctly calculates these for *each face*.
+
+3.  **Single-Row Mode Vertical Positioning:**
+    *   The logic for `pos_y` in single-row mode, accounting for rails and joint spacing, is complex. Double-check all offsets and additions to ensure rails are consistently positioned correctly relative to the single row of stones.
+    *   Ensure that the `single_row_height` is properly constrained by `available_vertical_space`.
+
+4.  **`puts` Statements:** As noted for `core.rb`, consider wrapping these in a debug flag.
+
+5.  **`start_row_height_index_for_face` Logic (Clarification):**
+    *   The comment `# FIXED: height_index should start at 0 because height_values is already rotated` is excellent. This shows careful debugging and understanding. This looks correct.
+
+---
+
+## 3. Analysis of `multi_face_position.rb`
+
+This small file defines a data model for holding information about multiple selected faces.
+
+### Strengths:
+
+*   **Clear Data Model:** Provides a clean and sensible way to package `Sketchup::Face` objects along with their `Geom::Transformation` matrices. This is essential when working with nested geometry.
+*   **Simple API:** `add_face`, `valid?`, `get_face_data` are straightforward.
+
+### Areas for Improvement / Feedback:
+
+1.  **Namespacing (HIGH PRIORITY - CRITICAL):**
+    *   The class name `CladzPARAMETRIXMultiFacePosition` is a good attempt at uniqueness, but it's not consistent with the rest of your modules (e.g., `module PARAMETRIX`).
+    *   **Recommendation:** All your code should reside under a single, highly unique, top-level namespace. For example:
+        ```ruby
+        # In a file like cladz_parametrix.rb
+        module Cladz
+          module Parametrix
+            # All your existing PARAMETRIX module code here
+
+            # Rename this class to be more concise within its namespace
+            class MultiFacePosition
+              attr_accessor :faces, :matrices, :face_count
+
+              def initialize
+                @faces = []
+                @matrices = []
+                @face_count = 0
+              end
+
+              def add_face(face, matrix = Geom::Transformation.new)
+                @faces << face
+                @matrices << matrix
+                @face_count += 1
+              end
+
+              def valid?
+                @face_count > 0 && @faces.all? { |face| face && face.valid? }
+              end
+
+              def get_face_data(index)
+                return nil if index >= @face_count
+                { face: @faces[index], matrix: @matrices[index] }
+              end
+            end # class MultiFacePosition
+          end # module Parametrix
+        end # module Cladz
+        ```
+    *   You would then refer to it as `Cladz::Parametrix::MultiFacePosition`. This is the **single most important SketchUp best practice** to prevent conflicts with other extensions.
+
+---
+
+## 4. Analysis of `trimming_v3.rb`
+
+This module provides a dedicated and robust approach to 2D boolean trimming, which is a common challenge in SketchUp extensions.
+
+### Strengths:
+
+*   **Dedicated Module:** Separating complex trimming logic into its own module (`PARAMETRIX_TRIMMING`) is excellent for modularity.
+*   **Correct `intersect_with` Usage:** The use of `layout_group.entities.intersect_with(true, ...)` with `self_intersect: true` is the correct and most effective API for this type of operation.
+*   **Hole Handling:** The `face_clone` method correctly handles inner loops (holes) by creating the outer face and then erasing the inner faces to form the holes.
+*   **Cleanup:** Removing `faces_to_remove` and `lonely_edges` after intersection is crucial for clean geometry.
+*   **2D Cutting Component:** Converting the result to a component instance and setting `is2d = true` and `cuts_opening = true` is a very advanced and powerful feature for creating dynamic, interactive cutting components. `be.snapto = 0` (any surface) is also well-chosen.
+
+### Areas for Improvement / Feedback:
+
+1.  **Namespacing (HIGH PRIORITY):**
+    *   As with `multi_face_position.rb`, this module should be nested under your main extension namespace (e.g., `Cladz::Parametrix::Trimming`).
+    *   **Recommendation:** `module Cladz; module Parametrix; module Trimming; ...; end; end; end;`
+
+2.  **`boolean2d_exact` Parameter Usage (CRITICAL BUG / HIGH PRIORITY):**
+    *   The `boolean2d_exact` method takes `original_face` and `face_matrix` as parameters. **However, it then proceeds to iterate `model.selection` to find the faces and components to use for the cutting boundary.**
+    *   **Problem:** This means the trimming operation will trim against whatever the user *currently has selected*, not necessarily the `original_face` that `layout_engine.rb` intended to trim against. This is a significant bug that will lead to incorrect behavior.
+    *   **Recommendation:**
+        *   **Remove the entire `model.selection` block.**
+        *   The `boundary_face` for trimming *must* be derived directly from the `original_face` parameter that was passed into `boolean2d_exact`.
+        *   The `face_clone` method also needs to be updated to accept a single face and its matrix, or you'll need to create the cutting face's geometry directly from the `original_face` and `face_matrix` parameters.
+
+3.  **Revised `clone_face` for `trimming_v3.rb` (Illustrative Example):**
+    To fix the critical bug, you'll need a robust helper to clone a single face, applying its transformation, and handling holes. Here's how it could look, and how `boolean2d_exact` would use it:
+
+    ```ruby
+    # In Cladz::Parametrix::Trimming module
+
+    def self.boolean2d_exact(layout_group, original_face, face_matrix = Geom::Transformation.new)
+      begin
+        model = Sketchup.active_model
+        ents  = model.active_entities
+        return layout_group unless model && layout_group && original_face && original_face.valid?
+
+        temp_cutting_group = ents.add_group
+        temp_cutting_gents = temp_cutting_group.entities
+
+        # *** CRITICAL FIX: Use the original_face parameter directly for the cutting boundary ***
+        boundary_face = clone_face_with_holes(temp_cutting_gents, original_face, face_matrix)
+
+        unless boundary_face && boundary_face.valid?
+          temp_cutting_group.erase! rescue nil
+          puts "[CLADZ::PARAMETRIX::Trimming] Failed to create boundary face. Returning original layout group."
+          return layout_group
+        end
+
+        original_world_normal = original_face.normal.transform(face_matrix)
+        if boundary_face.normal.dot(original_world_normal) < 0.1 # Using a small tolerance
+          boundary_face.reverse!
+        end
+
+        layout_group.entities.intersect_with(
+          true,
+          layout_group.transformation,
+          temp_cutting_gents,
+          temp_cutting_group.transformation,
+          false,
+          []
+        )
+
+        faces_to_remove = []
+        layout_group.entities.grep(Sketchup::Face).each do |f|
+          # Classify point projects the center onto the face's plane
+          if boundary_face.classify_point(f.bounds.center) == Sketchup::Face::PointOutside
+            faces_to_remove << f
+          end
+        end
+        layout_group.entities.erase_entities(faces_to_remove)
+
+        lonely_edges = []
+        layout_group.entities.grep(Sketchup::Edge).each do |edge|
+          lonely_edges << edge if edge.faces.empty?
+        end
+        layout_group.entities.erase_entities(lonely_edges) unless lonely_edges.empty?
+
+        temp_cutting_group.erase! rescue nil
+
+        inst = layout_group.to_component
+        defn = inst.definition
+        be = defn.behavior
+        be.is2d = true
+        be.cuts_opening = true
+        be.snapto = 0
+        defn.invalidate_bounds
+
+        inst.name = "Parametrix Layout"
+        defn.name = "Parametrix Layout Def"
+
+        return inst
+
+      rescue => e
+        puts "[CLADZ::PARAMETRIX::Trimming] Boolean trimming failed: #{e.message}"
+        begin; temp_cutting_group.erase! if temp_cutting_group && temp_cutting_group.valid?; rescue; end
+        return layout_group
+      end
+    end
+
+    # Helper method to clone a single Sketchup::Face with its holes, applying transformation.
+    def self.clone_face_with_holes(target_entities, source_face, face_matrix)
+      # Get outer loop vertices transformed to world space
+      outer_loop_points = source_face.outer_loop.vertices.map { |v| v.position.transform(face_matrix) }
+
+      # Get inner loop (hole) vertices transformed to world space
+      inner_loops_points = []
+      source_face.loops.each do |loop|
+        unless loop == source_face.outer_loop
+          inner_loop_points = loop.vertices.map { |v| v.position.transform(face_matrix) }
+          inner_loops_points << inner_loop_points
+        end
+      end
+
+      # Create the face using add_face with an array of point arrays for holes
+      if inner_loops_points.empty?
+        cloned_face = target_entities.add_face(outer_loop_points)
+      else
+        cloned_face = target_entities.add_face(outer_loop_points, inner_loops_points)
+      end
+
+      return cloned_face
+
+    rescue => e
+      puts "[CLADZ::PARAMETRIX::Trimming] Error cloning face with holes: #{e.message}"
+      return nil
+    end
+    ```
+
+---
+
+## Overall Architectural Guidance & Best Practices
+
+1.  **Unified Namespacing (CRITICAL PRIORITY):**
+    *   This is the most crucial step for a robust SketchUp extension. All your code (`PARAMETRIX` module, `PARAMETRIX_TRIMMING` module, `CladzPARAMETRIXMultiFacePosition` class) should reside under *one, highly unique, top-level module*.
+    *   **Example:**
+        ```ruby
+        # cladz_parametrix.rb (main loader file)
+        require 'sketchup.rb'
+        require 'extensions.rb'
+
+        module Cladz
+          module Parametrix
+            VERSION = "1.0.0" # Use a constant for the version
+            # ... other top-level code like the extension registration ...
+            # E.g., EX_CLADZ_PARAMETRIX = SketchupExtension.new("Cladz Parametrix", "cladz_parametrix/loader.rb")
+          end
+        end
+
+        # cladz_parametrix/core.rb
+        module Cladz::Parametrix
+          # Your existing core.rb content here, but without the `module PARAMETRIX` wrapper
+          # Access @@variables as `self.class_variable_get(:@@length)` or through accessors.
+          # Or, better, use a `Settings` module as below.
+
+          # Add module/class definitions like:
+          # module LayoutEngine; end
+          # module Trimming; end
+          # class MultiFacePosition; end
+          # etc.
+        end
+        ```
+    *   This prevents conflicts and makes your extension well-behaved in the SketchUp ecosystem.
+
+2.  **Settings Management with Persistence (HIGH PRIORITY):**
+    *   Create a dedicated `Settings` module within `Cladz::Parametrix` that handles loading and saving all `@@` variables.
+    *   **Example:**
+        ```ruby
+        # cladz_parametrix/settings.rb
+        module Cladz::Parametrix
+          module Settings
+            extend self # Allows calling methods like Cladz::Parametrix::Settings.load
+
+            # Define all settings with default values
+            DEFAULT_SETTINGS = {
+              :length => "800;900;1000;1100;1200",
+              :height => "100;200;300",
+              :thickness => 20.0,
+              # ... all your other @@ variables here ...
+            }.freeze
+
+            # Class variables to hold current values
+            DEFAULT_SETTINGS.each do |key, value|
+              class_variable_set(:"@@#{key}", value)
+              attr_reader key # Create a reader for each setting
+              define_method("#{key}=") { |v| class_variable_set(:"@@#{key}", v) }
+            end
+
+            # Special case for boolean, needs proper handling
+            class_variable_set(:"@@randomize_lengths", true)
+            def randomize_lengths; @@randomize_lengths; end
+            def randomize_lengths=(v); @@randomize_lengths = !!v; end # Ensure boolean
+
+            def load_settings
+              DEFAULT_SETTINGS.each do |key, default_value|
+                # Use a unique identifier for your extension
+                value = Sketchup.read_default("CladzParametrix", key.to_s, default_value)
+                send("#{key}=", value) # Set the class variable using the accessor
+              end
+              # Special load for booleans if read_default returns string "true"/"false"
+              @@randomize_lengths = (Sketchup.read_default("CladzParametrix", "randomize_lengths", true).to_s == "true")
+              # ... do this for all other booleans
+            end
+
+            def save_settings
+              DEFAULT_SETTINGS.each_key do |key|
+                Sketchup.write_default("CladzParametrix", key.to_s, send(key))
+              end
+              # Special save for booleans to store "true"/"false" strings
+              Sketchup.write_default("CladzParametrix", "randomize_lengths", @@randomize_lengths)
+              # ... do this for all other booleans
+            end
+          end # module Settings
+        end # module Parametrix
+        ```
+    *   Then, `Cladz::Parametrix::Settings.load_settings` would be called on extension load, and `Cladz::Parametrix::Settings.save_settings` when settings are changed (e.g., via a dialog) or perhaps on SketchUp shutdown.
+    *   You would access settings via `Cladz::Parametrix::Settings.length` instead of `PARAMETRIX::@@length`.
+
+3.  **Dead Code Removal (HIGH PRIORITY):**
+    *   As mentioned, remove all the unused or deprecated geometry generation and trimming methods from `core.rb`. This simplifies your codebase significantly.
+
+4.  **Refactor `create_unified_layout_for_face` (MEDIUM PRIORITY):**
+    *   Break it into smaller, more manageable helper methods as suggested in the `layout_engine.rb` analysis. This greatly enhances readability and maintainability.
+
+5.  **Robust Error Handling & User Feedback (MEDIUM PRIORITY):**
+    *   For critical errors (e.g., trimming failure, invalid geometry selection), use `UI.messagebox` to inform the user instead of just `puts` or silently failing. Provide actionable messages.
+
+6.  **File Structure:**
+    *   Organize your files more formally within a sub-directory, matching your new namespace:
+        ```
+        <SketchUp Plugins Folder>/
+        ├── cladz_parametrix.rb          # Main loader, registers extension
+        └── cladz_parametrix/
+            ├── init.rb                  # (Optional) Loaded by cladz_parametrix.rb, requires other files
+            ├── core.rb                  # Common utilities, constants, unit functions
+            ├── settings.rb              # Handles persistent settings
+            ├── layout_engine.rb         # Main layout generation logic
+            ├── trimming.rb              # Boolean trimming operations
+            ├── multi_face_position.rb   # Data model
+            └── ui.rb                    # UI definition (menus, dialogs, callbacks)
+        ```
+
+7.  **`puts` Statements:** Wrap all `puts` statements in a debug conditional (e.g., `if Cladz::Parametrix::DEBUG_MODE`).
+
+---
+
+By implementing these recommendations, particularly the crucial namespacing and trimming fix, you'll transform an already capable extension into a truly professional, robust, and maintainable product ready for distribution. You've done excellent work on the core geometric problem-solving!
+
+[USER @ 12:35:59 AM]
+as you reviewed the overall layout generation process, i have some problems needs to be fixed, the first is that the layout generation fails when i change the layout starting direction instead of just changing the starting direction simply from a side to another, it for example generates a full proper layout, and if i switch the direction to starting option it generates a layout with missing pieces or 1/4 layout or a layout with rails but wthout actual main pieces... idk if u mentioned that problem in your analysis, u can see in the log below while on preview of the layout and modification of the setting, the same face layout generated multiple times with 60 elements with different layout starting direction setting, and suddenly failed and generated 2 elements when the setting is from two specific directions. this is a crazy behavior as now if i retest the same face with the same settings and face se;ected, it might not have any problems and migh also have different problems out of nowhere..... see the two screenshots or the layout generated with 60 elements and 2 elements 
+
+
+[PARAMETRIX] Creating preview with UNIFIED LAYOUT...
+[PARAMETRIX] Multi-Row Layout Mode ACTIVE. Using general parameters.
+[PARAMETRIX] Original height values: [1200.0]
+[PARAMETRIX] Height index requested: 1
+[PARAMETRIX] Final height pattern: [1200.0]
+[PARAMETRIX] ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■  ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ 
+[PARAMETRIX] 🌍 MULTI-FACE UNIFIED LAYOUT PROCESSING
+[PARAMETRIX] ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ 
+[PARAMETRIX] Faces: 1
+[PARAMETRIX] Mode: UNIFIED (Global top/bottom synchronization)
+TEST: Direction=center, HeightIndex=1 → Elements=60, BottomRowHeight=1200.0
+[PARAMETRIX] Previous preview removed
+[PARAMETRIX] Creating preview with UNIFIED LAYOUT...
+[PARAMETRIX] Multi-Row Layout Mode ACTIVE. Using general parameters.
+[PARAMETRIX] Original height values: [1200.0]
+[PARAMETRIX] Height index requested: 1
+[PARAMETRIX] Final height pattern: [1200.0]
+[PARAMETRIX] ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■  ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ 
+[PARAMETRIX] 🌍 MULTI-FACE UNIFIED LAYOUT PROCESSING
+[PARAMETRIX] ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ 
+[PARAMETRIX] Faces: 1
+[PARAMETRIX] Mode: UNIFIED (Global top/bottom synchronization)
+TEST: Direction=top_left, HeightIndex=1 → Elements=60, BottomRowHeight=1200.0
+[PARAMETRIX] Previous preview removed
+[PARAMETRIX] Creating preview with UNIFIED LAYOUT...
+[PARAMETRIX] Multi-Row Layout Mode ACTIVE. Using general parameters.
+[PARAMETRIX] Original height values: [1200.0]
+[PARAMETRIX] Height index requested: 1
+[PARAMETRIX] Final height pattern: [1200.0]
+[PARAMETRIX] ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■  ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ 
+[PARAMETRIX] 🌍 MULTI-FACE UNIFIED LAYOUT PROCESSING
+[PARAMETRIX] ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ 
+[PARAMETRIX] Faces: 1
+[PARAMETRIX] Mode: UNIFIED (Global top/bottom synchronization)
+TEST: Direction=top, HeightIndex=1 → Elements=60, BottomRowHeight=1200.0
+[PARAMETRIX] Previous preview removed
+[PARAMETRIX] Creating preview with UNIFIED LAYOUT...
+[PARAMETRIX] Multi-Row Layout Mode ACTIVE. Using general parameters.
+[PARAMETRIX] Original height values: [1200.0]
+[PARAMETRIX] Height index requested: 1
+[PARAMETRIX] Final height pattern: [1200.0]
+[PARAMETRIX] ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■  ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ 
+[PARAMETRIX] 🌍 MULTI-FACE UNIFIED LAYOUT PROCESSING
+[PARAMETRIX] ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ 
+[PARAMETRIX] Faces: 1
+[PARAMETRIX] Mode: UNIFIED (Global top/bottom synchronization)
+TEST: Direction=bottom, HeightIndex=1 → Elements=60, BottomRowHeight=1200.0
+[PARAMETRIX] Previous preview removed
+[PARAMETRIX] Creating preview with UNIFIED LAYOUT...
+[PARAMETRIX] Multi-Row Layout Mode ACTIVE. Using general parameters.
+[PARAMETRIX] Original height values: [1200.0]
+[PARAMETRIX] Height index requested: 1
+[PARAMETRIX] Final height pattern: [1200.0]
+[PARAMETRIX] ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■  ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ 
+[PARAMETRIX] 🌍 MULTI-FACE UNIFIED LAYOUT PROCESSING
+[PARAMETRIX] ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ 
+[PARAMETRIX] Faces: 1
+[PARAMETRIX] Mode: UNIFIED (Global top/bottom synchronization)
+TEST: Direction=left, HeightIndex=1 → Elements=60, BottomRowHeight=1200.0
+[PARAMETRIX] Previous preview removed
+[PARAMETRIX] Creating preview with UNIFIED LAYOUT...
+[PARAMETRIX] Multi-Row Layout Mode ACTIVE. Using general parameters.
+[PARAMETRIX] Original height values: [1200.0]
+[PARAMETRIX] Height index requested: 1
+[PARAMETRIX] Final height pattern: [1200.0]
+[PARAMETRIX] ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■  ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ 
+[PARAMETRIX] 🌍 MULTI-FACE UNIFIED LAYOUT PROCESSING
+[PARAMETRIX] ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ 
+[PARAMETRIX] Faces: 1
+[PARAMETRIX] Mode: UNIFIED (Global top/bottom synchronization)
+TEST: Direction=right, HeightIndex=1 → Elements=2, BottomRowHeight=1200.0
+[PARAMETRIX] Previous preview removed
+[PARAMETRIX] Creating preview with UNIFIED LAYOUT...
+[PARAMETRIX] Multi-Row Layout Mode ACTIVE. Using general parameters.
+[PARAMETRIX] Original height values: [1200.0]
+[PARAMETRIX] Height index requested: 1
+[PARAMETRIX] Final height pattern: [1200.0]
+[PARAMETRIX] ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■  ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ 
+[PARAMETRIX] 🌍 MULTI-FACE UNIFIED LAYOUT PROCESSING
+[PARAMETRIX] ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ 
+[PARAMETRIX] Faces: 1
+[PARAMETRIX] Mode: UNIFIED (Global top/bottom synchronization)
+TEST: Direction=bottom_right, HeightIndex=1 → Elements=2, BottomRowHeight=1200.0
+[PARAMETRIX] Previous preview removed
+[PARAMETRIX] Creating preview with UNIFIED LAYOUT...
+[PARAMETRIX] Multi-Row Layout Mode ACTIVE. Using general parameters.
+[PARAMETRIX] Original height values: [1200.0]
+[PARAMETRIX] Height index requested: 1
+[PARAMETRIX] Final height pattern: [1200.0]
+[PARAMETRIX] ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■  ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■
+
+[MODEL @ 12:35:59 AM]
+Ah, this is the kind of tricky, intermittent bug that keeps a SketchUp developer up at night! You've hit a classic issue arising from inconsistencies in coordinate system transformations and boundary checks, especially when dealing with various `layout_start_direction` settings.
+
+Your log provides crucial evidence:
+*   "TEST: Direction=right, HeightIndex=1 → Elements=2"
+*   "TEST: Direction=bottom_right, HeightIndex=1 → Elements=2"
+
+The sudden drop from 60 elements to 2 (or missing pieces/rails) for specific directions strongly suggests that the layout engine is miscalculating the available space, the starting position, or the iteration direction, causing the loops that generate pieces and rows to terminate prematurely.
+
+My previous analysis touched upon the importance of consistent coordinate system handling, especially with `get_face_transformation_matrix_user_logic` and how global vs. local bounds are used. This problem *is* directly related to those points.
+
+---
+
+### The Root Cause: Inconsistent Coordinate System Interpretation
+
+The core of the problem lies in a mismatch between:
+
+1.  **How the face's "local layout coordinate system" is defined:** This is handled by `PARAMETRIX.get_face_transformation_matrix_user_logic`, which provides `tr_face_to_world` (renamed `tr_layout_to_world` in my proposed fix) and its inverse. This transformation essentially flattens your face onto an XY plane, giving you a 2D space to work in.
+2.  **How the overall bounds and starting positions are calculated:** `PARAMETRIX.calculate_global_unified_bounds` and `PARAMETRIX.calculate_unified_start_position` *currently operate on world-axis-aligned bounding boxes*.
+
+When you combine a face that's significantly rotated in world space with a layout algorithm trying to interpret "min_x" or "max_x" from a world-axis-aligned bounding box, those `min_x`/`max_x` values don't necessarily correspond to the "leftmost" or "rightmost" of the face *within its own layout plane*.
+
+For example:
+*   A rectangular face is tilted 45 degrees relative to the world axes.
+*   `get_face_transformation_matrix_user_logic` correctly sets up a `tr_layout_to_world` that makes the face's local X-axis run along its longest edge.
+*   `calculate_unified_start_position` then uses `global_face_bounds.min.x` (a world coordinate) to determine a starting X. This `min.x` might be physically far from the "left edge" of the face as defined by its local layout X-axis.
+*   When `@@layout_start_direction` is "right" or "bottom_right", the logic for deriving the initial `current_pos_x` and `current_pos_y` in `layout_engine.rb` combined with the "world-aligned" `min_x`/`max_x` becomes incorrect, causing premature loop termination.
+
+---
+
+### Proposed Solution: A Consistent "Layout Space"
+
+We need to enforce that all layout calculations (bounds, start positions, increments) happen entirely within a dedicated "layout space" for each face, defined by `tr_layout_to_world`. Only the final piece geometry should be transformed back to world coordinates.
+
+Here's a refactoring of the relevant methods in `core.rb` and `layout_engine.rb` to achieve this consistency.
+
+---
+
+### **1. Refactoring `core.rb` (Updated Code)**
+
+The `PARAMETRIX` module will be responsible for defining the face's local layout coordinate system and calculating positions within it.
+
+```ruby
+# In cladz_parametrix/core.rb (assuming Cladz::Parametrix module wrapper as discussed)
+module PARAMETRIX # Your existing PARAMETRIX module
+  # ... (existing constants, @@variables, etc.) ...
+
+  # @@tolerance should be a small value for float comparisons
+  @@tolerance = 0.001.mm # Using a small length to handle floating point inaccuracies
+
+  # This method now returns a comprehensive hash of transformations and axes
+  # that define the face's 'layout space'.
+  # It ensures that layout_x_axis_world and layout_y_axis_world are consistently defined
+  # to point towards positive X and Y in the layout system.
+  def self.get_face_transformation_matrix_user_logic(face_data_hash, face_matrix)
+    face = face_data_hash[:face]
+    model = Sketchup.active_model # If model needed for entity operations
+
+    # Get the face's normal in world coordinates (considering parent transformations)
+    world_face_normal = face.normal.transform(face_matrix)
+
+    # 1. Establish a stable base origin for the layout on the face
+    # Let's use the transformed position of the first vertex of the outer loop.
+    # This point will be the (0,0,0) in our generated 'layout space'
+    layout_origin_world = face.outer_loop.vertices.first.position.transform(face_matrix)
+
+    # 2. Determine base layout X and Y axes on the face's plane.
+    # These axes will consistently point in a 'positive' direction for our layout space.
+    layout_x_axis_world = Geom::Vector3d.new(0,0,0)
+    layout_y_axis_world = Geom::Vector3d.new(0,0,0)
+
+    if @@force_horizontal_layout # Layout aligned to world axes
+      layout_x_axis_world = X_AXIS
+      layout_y_axis_world = Y_AXIS
+    else # Layout aligned to the face's own geometry
+      # Find the longest edge (transformed to world space) to use as a primary axis
+      longest_edge_world_vector = Geom::Vector3d.new(0,0,0)
+      max_len = 0
+      face.edges.each do |edge|
+        vec = (edge.end.position - edge.start.position).transform(face_matrix)
+        len = vec.length
+        if len > max_len
+          max_len = len
+          longest_edge_world_vector = vec.normalize
+        end
+      end
+
+      # Fallback if no valid edges (e.g., circular face without explicit edges)
+      if longest_edge_world_vector.length == 0 || longest_edge_world_vector.parallel?(world_face_normal)
+        # Project world X-axis onto the face's plane as a fallback
+        layout_x_axis_world = X_AXIS.project_to_plane(world_face_normal)
+        if layout_x_axis_world.nil? || layout_x_axis_world.length < @@tolerance # If X-axis is perpendicular to normal (i.e. normal is X_AXIS)
+          layout_x_axis_world = Y_AXIS.project_to_plane(world_face_normal) # Try Y-axis
+          if layout_x_axis_world.nil? || layout_x_axis_world.length < @@tolerance
+            layout_x_axis_world = Z_AXIS.project_to_plane(world_face_normal) # Try Z-axis
+          end
+        end
+        layout_x_axis_world = layout_x_axis_world.normalize # Ensure it's a unit vector
+      else
+        layout_x_axis_world = longest_edge_world_vector
+      end
+
+      # Now, ensure layout_x_axis_world is actually on the face's plane
+      # And create layout_y_axis_world orthogonal to it and the face normal.
+      layout_y_axis_world = world_face_normal.cross(layout_x_axis_world).normalize
+      layout_x_axis_world = layout_y_axis_world.cross(world_face_normal).normalize # Re-orthogonalize to ensure perfect basis
+
+      # If the user wants the longest edge to be the Y-axis, swap them
+      if @@longest_edge_direction == 'longest_edge_y_axis'
+        temp_axis = layout_x_axis_world
+        layout_x_axis_world = layout_y_axis_world
+        layout_y_axis_world = temp_axis
+      end
+    end
+    
+    # We need a Z-axis for the transformation, which is the face normal.
+    layout_z_axis_world = world_face_normal
+
+    # Create the transformation from the 'layout space' (where pieces are laid out as (x,y,0)) to world space.
+    tr_layout_to_world = Geom::Transformation.new(layout_origin_world, layout_x_axis_world, layout_y_axis_world, layout_z_axis_world)
+    tr_world_to_layout = tr_layout_to_world.inverse
+
+    {
+      tr_layout_to_world: tr_layout_to_world, # Transforms (x,y,0) in layout space to world
+      tr_world_to_layout: tr_world_to_layout, # Transforms world points to (x,y,z) in layout space
+      layout_x_axis_world: layout_x_axis_world, # X-axis vector in world coordinates
+      layout_y_axis_world: layout_y_axis_world, # Y-axis vector in world coordinates
+      layout_origin_world: layout_origin_world # Origin of layout space in world coordinates
+    }
+  rescue => e
+    puts "[PARAMETRIX] Error in get_face_transformation_matrix_user_logic: #{e.message}"
+    puts e.backtrace
+    # Fallback to identity transformation, though this will likely lead to incorrect layouts.
+    {
+      tr_layout_to_world: Geom::Transformation.new,
+      tr_world_to_layout: Geom::Transformation.new,
+      layout_x_axis_world: X_AXIS,
+      layout_y_axis_world: Y_AXIS,
+      layout_origin_world: Geom::Point3d.new(0,0,0)
+    }
+  end
+
+  # Calculates the bounding box of the face *within its own local layout coordinate system*.
+  def self.calculate_face_layout_bounds(face, tr_world_to_layout)
+    face_layout_bounds = Geom::BoundingBox.new
+    # Add all vertices of outer and inner loops (for holes) transformed into the layout space
+    face.loops.each do |loop|
+      loop.vertices.each do |v|
+        face_layout_bounds.add(v.position.transform(tr_world_to_layout))
+      end
+    end
+    face_layout_bounds
+  end
+
+  # Calculates the layout's starting point and iteration directions (1 or -1)
+  # entirely based on the `face_layout_bounds` (in local layout space).
+  def self.calculate_layout_start_position(face_layout_bounds, effective_layout_start_direction)
+    min_x = face_layout_bounds.min.x
+    max_x = face_layout_bounds.max.x
+    min_y = face_layout_bounds.min.y
+    max_y = face_layout_bounds.max.y
+
+    start_x = 0.0
+    start_y = 0.0
+    x_step_direction = 1 # 1 for left-to-right (min_x to max_x), -1 for right-to-left
+    y_step_direction = 1 # 1 for bottom-to-top (min_y to max_y), -1 for top-to-bottom
+
+    case effective_layout_start_direction
+    when "bottom_left"
+      start_x = min_x
+      start_y = min_y
+      x_step_direction = 1
+      y_step_direction = 1
+    when "bottom"
+      start_x = min_x # Horizontal iteration still starts left, but overall layout will be centered
+      start_y = min_y
+      x_step_direction = 1
+      y_step_direction = 1
+    when "bottom_right"
+      start_x = max_x # Start at max_x, iterate left
+      start_y = min_y
+      x_step_direction = -1
+      y_step_direction = 1
+    when "left"
+      start_x = min_x
+      start_y = min_y # Vertical iteration still starts bottom, but overall layout will be centered
+      x_step_direction = 1
+      y_step_direction = 1
+    when "center"
+      start_x = min_x # Horizontal iteration still starts left, overall centered
+      start_y = min_y # Vertical iteration still starts bottom, overall centered
+      x_step_direction = 1
+      y_step_direction = 1
+    when "right"
+      start_x = max_x
+      start_y = min_y # Vertical iteration still starts bottom, overall centered
+      x_step_direction = -1
+      y_step_direction = 1
+    when "top_left"
+      start_x = min_x
+      start_y = max_y # Start at max_y, iterate down
+      x_step_direction = 1
+      y_step_direction = -1
+    when "top"
+      start_x = min_x
+      start_y = max_y
+      x_step_direction = 1
+      y_step_direction = -1
+    when "top_right"
+      start_x = max_x
+      start_y = max_y
+      x_step_direction = -1
+      y_step_direction = -1
+    else # Default to bottom_left
+      start_x = min_x
+      start_y = min_y
+      x_step_direction = 1
+      y_step_direction = 1
+    end
+
+    # Return initial start positions and step directions for the layout engine
+    {
+      start_x: start_x,
+      start_y: start_y,
+      x_step_direction: x_step_direction,
+      y_step_direction: y_step_direction,
+      face_layout_bounds: face_layout_bounds # Pass bounds for checking
+    }
+  end
+
+  # ... (other helper methods like create_materials, create_piece_with_ghosting, etc.)
+  # NOTE: create_piece_with_ghosting should accept piece_center_local, and use tr_layout_to_world internally.
+  def self.create_piece_with_ghosting(entities, piece_center_local, piece_length_su, piece_height_su, thickness_su, ghost_material_name, tr_layout_to_world, is_preview)
+    # 1. Create the base face at (0,0,0) in layout space
+    face_points_local = [
+      Geom::Point3d.new(-piece_length_su / 2.0, -piece_height_su / 2.0, 0),
+      Geom::Point3d.new( piece_length_su / 2.0, -piece_height_su / 2.0, 0),
+      Geom::Point3d.new( piece_length_su / 2.0,  piece_height_su / 2.0, 0),
+      Geom::Point3d.new(-piece_length_su / 2.0,  piece_height_su / 2.0, 0)
+    ]
+    
+    # 2. Translate these points to the piece_center_local in layout space
+    translation_transform_local = Geom::Transformation.translation(piece_center_local)
+    face_points_local_translated = face_points_local.map { |p| p.transform(translation_transform_local) }
+
+    # 3. Transform points to world space
+    face_points_world = face_points_local_translated.map { |p| p.transform(tr_layout_to_world) }
+
+    # ... (rest of create_piece_with_ghosting logic to add face, pushpull, apply material)
+    # Example:
+    piece_face = entities.add_face(face_points_world)
+    if piece_face && piece_face.valid?
+      if piece_face.normal.dot(tr_layout_to_world.zaxis) < 0 # Ensure face normal points outwards
+        piece_face.reverse!
+      end
+      # Pushpull needs to be carefully applied. If tr_layout_to_world.zaxis is face normal,
+      # then pushpull is along that vector.
+      begin
+        piece_face.pushpull(thickness_su)
+      rescue => e
+        puts "[PARAMETRIX] Pushpull failed for piece at #{piece_center_local.inspect}: #{e.message}"
+        # Erase the problematic face if pushpull fails
+        piece_face.erase! rescue nil
+        return nil
+      end
+
+      # Apply material (existing logic)
+      material = PARAMETRIX.create_materials(ghost_material_name)
+      piece_face.material = material if piece_face.material.nil? # Apply to front face
+      piece_face.back_material = material if piece_face.back_material.nil? # Apply to back face
+      piece_face.parent.material = material # Apply to group/component container
+
+      # If it's a preview, mark it for removal
+      if is_preview
+        piece_face.parent.attribute_dictionaries.set("CladzParametrix", "preview_element", true)
+      end
+    end
+    piece_face.parent # Return the group/component containing the piece
+  end
+
+  # ... (remove unused functions like filter_and_extend_pieces, generate_single_length_row_with_min_piece, etc.)
+end # End of PARAMETRIX module
+```
+
+---
+
+### **2. Refactoring `layout_engine.rb` (Updated Code)**
+
+The `LayoutEngine` module will now strictly use the local layout bounds and step directions provided by `PARAMETRIX`.
+
+```ruby
+# In cladz_parametrix/layout_engine.rb (assuming Cladz::Parametrix module wrapper)
+module PARAMETRIX # Your existing PARAMETRIX module
+  module LayoutEngine
+    # ... (existing @@variables) ...
+
+    # Renamed: Was create_multi_face_unified_layout
+    def self.generate_layout_for_faces(all_faces_data, is_preview = false)
+      model = Sketchup.active_model
+      ents = model.active_entities
+
+      # Initialize global seeds for pattern synchronization
+      @global_length_seed = rand(1_000_000)
+      @global_height_seed = rand(1_000_000)
+
+      # Start an Undo operation
+      op_name = is_preview ? "Parametrix Layout Preview" : "Parametrix Layout"
+      model.start_operation(op_name, true)
+
+      layout_group_parent = is_preview ? ents : model # If not preview, add directly to model entities
+      final_layout_group = layout_group_parent.add_group
+      final_layout_gents = final_layout_group.entities
+
+      begin
+        puts "[PARAMETRIX] 🌍 MULTI-FACE UNIFIED LAYOUT PROCESSING"
+        puts "[PARAMETRIX] ■" * 70
+        puts "[PARAMETRIX] Faces: #{all_faces_data.face_count}"
+        puts "[PARAMETRIX] Mode: UNIFIED (Global top/bottom synchronization)"
+
+        # Process each face
+        all_faces_data.faces.each_with_index do |face, index|
+          face_matrix = all_faces_data.matrices[index]
+          create_unified_layout_for_face({face: face, matrix: face_matrix}, face_matrix, is_preview, final_layout_gents)
+        end
+
+        # ... (material application, trimming logic)
+        # Assuming you will modify your trimming logic to take the final_layout_group
+
+        model.commit_operation
+        return final_layout_group # Return the generated group/component
+
+      rescue => e
+        puts "[PARAMETRIX] Layout generation failed: #{e.message}"
+        puts e.backtrace
+        model.abort_operation
+        return nil
+      end
+    end
+
+    # This is the core layout generation for a single face, operating in its local layout space.
+    def self.create_unified_layout_for_face(face_data_hash, face_matrix, is_preview, target_entities)
+      face = face_data_hash[:face]
+
+      # Determine face's layout transformations and axes
+      face_transforms = PARAMETRIX.get_face_transformation_matrix_user_logic(face_data_hash, face_matrix)
+      tr_layout_to_world = face_transforms[:tr_layout_to_world]
+      tr_world_to_layout = face_transforms[:tr_world_to_layout]
+      
+      # Calculate the face's bounds in its local layout space
+      face_layout_bounds = PARAMETRIX.calculate_face_layout_bounds(face, tr_world_to_layout)
+
+      # Determine the layout's starting position and iteration directions
+      # The `@@layout_start_direction` is used here (effective_layout_start_direction is only for single_row_mode)
+      initial_layout_params = PARAMETRIX.calculate_layout_start_position(face_layout_bounds, @@layout_start_direction)
+      
+      current_pos_x = initial_layout_params[:start_x]
+      current_pos_y = initial_layout_params[:start_y]
+      x_step_direction = initial_layout_params[:x_step_direction]
+      y_step_direction = initial_layout_params[:y_step_direction]
+      
+      min_x_layout = face_layout_bounds.min.x
+      max_x_layout = face_layout_bounds.max.x
+      min_y_layout = face_layout_bounds.min.y
+      max_y_layout = face_layout_bounds.max.y
+
+      # --- Manage horizontal row offsets based on single_row_mode ---
+      # This needs to be done *before* piece generation to affect row_offset_x_su
+      current_effective_layout_start_direction = @@layout_start_direction
+      if @@single_row_mode && (@@single_row_mode_is_active || !@@force_horizontal_layout)
+        current_effective_layout_start_direction = @@single_row_layout_start_direction
+      end
+
+      # Determine ghosting material based on preview status
+      ghost_material_name = is_preview ? PARAMETRIX::GHOST_MATERIAL_PREVIEW : PARAMETRIX::GHOST_MATERIAL_MAIN_PIECE
+      
+      # Use synchronized seeds if enabled
+      srand(@global_length_seed) if @@synchronize_patterns
+      length_values_raw = PARAMETRIX.parse_multi_values(@@single_row_mode_is_active ? @@single_row_length : @@length)
+      srand(@global_height_seed) if @@synchronize_patterns
+      height_values_raw = PARAMETRIX.parse_multi_values(@@single_row_mode_is_active ? @@single_row_height : @@height)
+
+      length_values = length_values_raw.map { |l| l * PARAMETRIX.get_effective_unit_conversion }
+      height_values = height_values_raw.map { |h| h * PARAMETRIX.get_effective_unit_conversion }
+
+      if length_values.empty? || length_values.all?(&:zero?)
+        puts "[PARAMETRIX] No valid length values, using default."
+        length_values = [PARAMETRIX::DEFAULT_LENGTH * PARAMETRIX.get_effective_unit_conversion]
+      end
+      if height_values.empty? || height_values.all?(&:zero?)
+        puts "[PARAMETRIX] No valid height values, using default."
+        height_values = [PARAMETRIX::DEFAULT_HEIGHT * PARAMETRIX.get_effective_unit_conversion]
+      end
+
+      original_height_values = height_values.dup # Keep for logging
+
+      # Apply joint width initially to the starting position
+      if x_step_direction == 1 && (@@layout_start_direction == "bottom_left" || @@layout_start_direction == "left" || @@layout_start_direction == "top_left" || @@layout_start_direction == "center")
+         current_pos_x += @@joint_width_su / 2.0
+      elsif x_step_direction == -1 && (@@layout_start_direction == "bottom_right" || @@layout_start_direction == "right" || @@layout_start_direction == "top_right")
+         current_pos_x -= @@joint_width_su / 2.0
+      end
+      if y_step_direction == 1 && (@@layout_start_direction == "bottom_left" || @@layout_start_direction == "bottom" || @@layout_start_direction == "bottom_right" || @@layout_start_direction == "center")
+         current_pos_y += @@joint_width_su / 2.0
+      elsif y_step_direction == -1 && (@@layout_start_direction == "top_left" || @@layout_start_direction == "top" || @@layout_start_direction == "top_right")
+         current_pos_y -= @@joint_width_su / 2.0
+      end
+
+      # --- Row Generation Loop ---
+      row_count = 0
+      while true
+        # Check if current_pos_y has exceeded bounds based on y_step_direction
+        break if (y_step_direction == 1 && current_pos_y >= max_y_layout - PARAMETRIX::@@tolerance) ||
+                  (y_step_direction == -1 && current_pos_y <= min_y_layout + PARAMETRIX::@@tolerance)
+
+        # Get row height, rotating pattern if needed
+        height_index = (row_count + @@height_pattern_start_index_for_face[face.entityID]) % height_values.length
+        row_height_su = height_values[height_index]
+
+        # Check if there's enough remaining vertical space for this row
+        remaining_vertical_space = (y_step_direction == 1) ? (max_y_layout - current_pos_y) : (current_pos_y - min_y_layout)
+        break if row_height_su > remaining_vertical_space + PARAMETRIX::@@tolerance
+
+        # --- Initialize X position for the current row ---
+        current_row_x = initial_layout_params[:start_x]
+        if x_step_direction == 1 && (@@layout_start_direction == "bottom_left" || @@layout_start_direction == "left" || @@layout_start_direction == "top_left" || @@layout_start_direction == "center")
+           current_row_x += @@joint_width_su / 2.0
+        elsif x_step_direction == -1 && (@@layout_start_direction == "bottom_right" || @@layout_start_direction == "right" || @@layout_start_direction == "top_right")
+           current_row_x -= @@joint_width_su / 2.0
+        end
+
+        # Apply row offset AFTER base start and initial joint offset
+        # This offset is applied along the X-axis of the layout plane
+        current_row_x += @@row_offset_x_su * x_step_direction
+        current_row_x += (@@randomize_offset ? (rand(-50..50) * PARAMETRIX.get_effective_unit_conversion) : 0)
+
+        # --- Piece Generation Loop for Current Row ---
+        pieces_in_row = []
+        piece_count_in_row = 0
+        while true
+          # Check if current_row_x has exceeded bounds based on x_step_direction
+          break if (x_step_direction == 1 && current_row_x >= max_x_layout - PARAMETRIX::@@tolerance) ||
+                    (x_step_direction == -1 && current_row_x <= min_x_layout + PARAMETRIX::@@tolerance)
+
+          # Get piece length, rotating pattern if needed
+          piece_length_su = @@randomize_lengths ? length_values.sample : length_values[piece_count_in_row % length_values.length]
+
+          # Check if there's enough remaining horizontal space for this piece
+          remaining_horizontal_space = (x_step_direction == 1) ? (max_x_layout - current_row_x) : (current_row_x - min_x_layout)
+          break if piece_length_su > remaining_horizontal_space + PARAMETRIX::@@tolerance
+
+          # Calculate piece center in layout space (relative to layout_origin_world)
+          # The piece's origin for `create_piece_with_ghosting` is its center.
+          piece_center_x_local = current_row_x + x_step_direction * piece_length_su / 2.0
+          piece_center_y_local = current_pos_y + y_step_direction * row_height_su / 2.0
+          piece_center_local = Geom::Point3d.new(piece_center_x_local, piece_center_y_local, 0)
+
+          # Create the piece (this function now transforms to world coordinates internally)
+          piece_group = PARAMETRIX.create_piece_with_ghosting(
+            target_entities,
+            piece_center_local,
+            piece_length_su,
+            row_height_su,
+            @@thickness_su,
+            ghost_material_name,
+            tr_layout_to_world, # Pass the transformation
+            is_preview
+          )
+          pieces_in_row << piece_group if piece_group
+
+          # Update current_row_x for the next piece
+          current_row_x += x_step_direction * (piece_length_su + @@joint_width_su)
+          piece_count_in_row += 1
+        end # End piece loop
+
+        # Update current_pos_y for the next row
+        current_pos_y += y_step_direction * (row_height_su + @@joint_width_su)
+        row_count += 1
+      end # End row loop
+
+      puts "TEST: Direction=#{@@layout_start_direction}, HeightIndex=#{@@height_pattern_start_index}, Elements=#{target_entities.count}, BottomRowHeight=#{original_height_values.first}"
+    end # End create_unified_layout_for_face
+
+    # ... (other methods) ...
+  end # End LayoutEngine
+end # End PARAMETRIX
+```
+
+---
+
+### **Key Changes and Why They Address the Problem:**
+
+1.  **`get_face_transformation_matrix_user_logic` (core.rb):**
+    *   **Consistent Axis Definition:** The `layout_x_axis_world` and `layout_y_axis_world` are now always derived to represent a positive X and positive Y direction on the face's plane. The choice between `longest_edge_x_axis` and `longest_edge_y_axis` (if `@@force_horizontal_layout` is false) determines which physical edge of the face aligns with the layout X-axis.
+    *   **Clear Outputs:** It returns `tr_layout_to_world` (from layout space to world) and `tr_world_to_layout` (from world to layout space).
+    *   **Robust Fallback:** Better handling for circular faces or faces without clear longest edges by projecting world axes.
+
+2.  **`calculate_face_layout_bounds` (core.rb - *New/Renamed*):**
+    *   This method *explicitly* calculates the bounding box of the face *after transforming its vertices into the local layout coordinate system*. This ensures `min_x`, `max_x`, `min_y`, `max_y` are perfectly consistent with the layout grid.
+
+3.  **`calculate_layout_start_position` (core.rb - *New/Renamed*):**
+    *   **Local Bounds Input:** It now takes `face_layout_bounds` (from `calculate_face_layout_bounds`), meaning all start position logic (`min_x`, `max_x`, `min_y`, `max_y`) is performed *within the face's own layout space*.
+    *   **Explicit Step Directions:** It returns `x_step_direction` and `y_step_direction` (either `1` or `-1`), which directly tell the layout engine whether to increment or decrement the position counters.
+    *   **Start Position Interpretation:** `start_x` and `start_y` are set to `min_x` or `max_x` based on the requested start direction, to serve as the *initial edge* for piece placement. For "center" starts, it still defaults to `min_x`/`min_y`, and the centering will need to be handled later by offsetting the entire layout if desired.
+
+4.  **`create_unified_layout_for_face` (layout_engine.rb):**
+    *   **Local Coordinates Dominant:** All internal loop conditions, `current_pos_x`, `current_pos_y`, and remaining space calculations (`max_x_layout - current_pos_x`) now exclusively use the `face_layout_bounds` and the `x_step_direction`/`y_step_direction`.
+    *   **Precise Boundary Checks:** The `while` loop conditions for `current_pos_x` and `current_pos_y` now robustly check against `min_x_layout` / `max_x_layout` using `PARAMETRIX::@@tolerance` to prevent floating-point comparison issues.
+    *   **Internal Piece Creation:** `create_piece_with_ghosting` now accepts `piece_center_local` and `tr_layout_to_world`, handling the transformation to world space *only at the very end* when creating the geometry.
+    *   **Joint Width Offsets:** Initial `current_pos_x` and `current_pos_y` now correctly include half a `@@joint_width_su` at the start, ensuring consistent spacing from the very first piece/row.
+
+By making these changes, you establish a clear and consistent coordinate system for all layout operations, eliminating the ambiguity that likely caused the erratic behavior you observed with different `layout_start_direction` settings. This should make your layout generation much more predictable and robust.
+
+Remember to also apply the overall architectural guidance from my previous review, especially the unified namespacing and settings persistence, to truly professionalize your extension.
+
+[USER @ 12:35:59 AM]
+Well, does that make uh affect the synchronizing of the layout on the faces across multiple uh faces. For example, if I have multiple faces selected, it's not necessary that they are connected or perpendicular to each other. Assuming that I'm on a top view with a standard view and I draw squares on the zero ax as faces and select them and generate a layout. Does the layout across the selected faces have the synchronized unified layout, or just each face have its own normal coordinate. I'm afraid that if these updates you provided now, if applied the unified coordination uh of the synchronizing layouts would be broken. I don't know, I'm not a developer, but I'm trying to find a solution based on what you said and based on what I have faced previously and fixed.
+
+[MODEL @ 12:35:59 AM]
+You've hit on a absolutely critical point, and your intuition is spot on! My previous changes focused on making the *individual face layout* robust against different orientations. However, you're right to question how this impacts the **multi-face synchronization** you've carefully built into your extension.
+
+The concern is valid: if each face calculates its start (`min_x`, `min_y`) purely based on its *own local layout bounds*, then disconnected faces (or even connected but differently oriented faces) will *not* have a globally unified or synchronized layout start. They will each correctly start at their "local bottom-left" (or whatever `@@layout_start_direction` implies for that face), but these local bottom-lefts might be completely misaligned in world space.
+
+Let's clarify what "unified" means in this context and how to achieve it with the new robust single-face layout logic:
+
+### Understanding "Unified Layout" in Multi-Face Scenarios
+
+A "unified layout" across multiple faces typically implies two things:
+
+1.  **Pattern Synchronization:** The sequence of lengths and heights (e.g., from `@@length`, `@@height`) should be consistent across all faces. You've already achieved this beautifully with `@@synchronize_patterns` and `srand(@global_length_seed)`. My previous changes do **NOT** break this.
+2.  **Spatial Synchronization (The Missing Piece):** The *spatial starting point and direction of progression* of the layout grid should be consistent across all faces, effectively aligning them to a single conceptual "global grid" defined by the overall selection. For example, if you say "start from bottom-left globally," then the bottom-leftmost tile of *every face's layout* should align with a conceptual "bottom-left" corner of the entire multi-face selection.
+
+My previous refactoring unintentionally removed the explicit use of `PARAMETRIX.calculate_global_unified_bounds` and `PARAMETRIX.calculate_unified_start_position` *within* the `create_unified_layout_for_face` method, which is where the spatial synchronization needed to happen.
+
+### The Fix: Re-integrating Global Alignment into the Local Layout
+
+The solution is to merge the best of both worlds:
+*   Use the **face-local layout coordinate system** (from `get_face_transformation_matrix_user_logic`) for robust geometry creation and bounds checking *within* each face.
+*   Use the **global unified start parameters** (from `calculate_global_unified_bounds` and `calculate_unified_start_position`) to *offset* each face's local layout grid, ensuring they are spatially synchronized.
+
+Here's how we'll adjust the `layout_engine.rb` and `core.rb` to achieve true multi-face unified spatial synchronization:
+
+---
+
+### **1. Refactoring `core.rb` (Updated `calculate_unified_start_position`)**
+
+We need `calculate_unified_start_position` to return not just the start point, but also the world-space vectors that define the *global* X and Y step directions.
+
+```ruby
+# In cladz_parametrix/core.rb (within module PARAMETRIX)
+
+# ... (existing code, including the @@tolerance, get_face_transformation_matrix_user_logic, calculate_face_layout_bounds) ...
+
+  # Calculates the global unified bounding box for all selected faces.
+  # This uses world coordinates for the combined bounds.
+  def self.calculate_global_unified_bounds(faces, matrices)
+    global_face_bounds = Geom::BoundingBox.new
+    faces.each_with_index do |face, index|
+      face_matrix = matrices[index]
+      # Add face's world bounds to the global bounds
+      face.bounds.transform(face_matrix).corners.each { |corner| global_face_bounds.add(corner) }
+    end
+    global_face_bounds
+  end
+
+  # Calculates the global layout's starting point and overall step directions in world coordinates.
+  # This serves as the reference for synchronizing layouts across multiple faces.
+  def self.calculate_unified_start_position(global_face_bounds, global_layout_start_direction)
+    min_x_world = global_face_bounds.min.x
+    max_x_world = global_face_bounds.max.x
+    min_y_world = global_face_bounds.min.y
+    max_y_world = global_face_bounds.max.y
+    min_z_world = global_face_bounds.min.z # Might be useful for 3D start alignment
+
+    start_point_world = Geom::Point3d.new(0,0,0)
+    x_step_direction_world_vector = X_AXIS # Default to +X
+    y_step_direction_world_vector = Y_AXIS # Default to +Y
+
+    case global_layout_start_direction
+    when "bottom_left"
+      start_point_world = Geom::Point3d.new(min_x_world, min_y_world, min_z_world)
+      x_step_direction_world_vector = X_AXIS
+      y_step_direction_world_vector = Y_AXIS
+    when "bottom"
+      # For "bottom", we align horizontally from min_x, vertically from min_y
+      start_point_world = Geom::Point3d.new(min_x_world, min_y_world, min_z_world)
+      x_step_direction_world_vector = X_AXIS
+      y_step_direction_world_vector = Y_AXIS
+    when "bottom_right"
+      start_point_world = Geom::Point3d.new(max_x_world, min_y_world, min_z_world)
+      x_step_direction_world_vector = X_AXIS.reverse
+      y_step_direction_world_vector = Y_AXIS
+    when "left"
+      # For "left", we align horizontally from min_x, vertically from min_y
+      start_point_world = Geom::Point3d.new(min_x_world, min_y_world, min_z_world)
+      x_step_direction_world_vector = X_AXIS
+      y_step_direction_world_vector = Y_AXIS
+    when "center"
+      # For "center", we align horizontally from min_x, vertically from min_y
+      start_point_world = Geom::Point3d.new(min_x_world, min_y_world, min_z_world)
+      x_step_direction_world_vector = X_AXIS
+      y_step_direction_world_vector = Y_AXIS
+    when "right"
+      start_point_world = Geom::Point3d.new(max_x_world, min_y_world, min_z_world)
+      x_step_direction_world_vector = X_AXIS.reverse
+      y_step_direction_world_vector = Y_AXIS
+    when "top_left"
+      start_point_world = Geom::Point3d.new(min_x_world, max_y_world, min_z_world)
+      x_step_direction_world_vector = X_AXIS
+      y_step_direction_world_vector = Y_AXIS.reverse
+    when "top"
+      start_point_world = Geom::Point3d.new(min_x_world, max_y_world, min_z_world)
+      x_step_direction_world_vector = X_AXIS
+      y_step_direction_world_vector = Y_AXIS.reverse
+    when "top_right"
+      start_point_world = Geom::Point3d.new(max_x_world, max_y_world, min_z_world)
+      x_step_direction_world_vector = X_AXIS.reverse
+      y_step_direction_world_vector = Y_AXIS.reverse
+    else # Default to bottom_left
+      start_point_world = Geom::Point3d.new(min_x_world, min_y_world, min_z_world)
+      x_step_direction_world_vector = X_AXIS
+      y_step_direction_world_vector = Y_AXIS
+    end
+
+    {
+      start_point_world: start_point_world, # The global origin for the layout grid
+      x_step_direction_world_vector: x_step_direction_world_vector, # Global X axis direction
+      y_step_direction_world_vector: y_step_direction_world_vector, # Global Y axis direction
+      global_face_bounds: global_face_bounds # The overall world bounding box
+    }
+  end
+
+  # The calculate_layout_start_position method from before (the one based on face_layout_bounds)
+  # is now renamed to emphasize it's for local / *preferred* start logic,
+  # and will primarily be used to derive local step directions, not absolute start points.
+  def self.get_face_local_step_directions(face_layout_bounds, effective_layout_start_direction)
+    # This method determines the *preferred* local iteration directions for a face,
+    # and whether the layout should start from min_x/min_y or max_x/max_y of its local bounds.
+    # We will use this to determine the LOCAL step directions for the loops.
+
+    x_step_direction = 1
+    y_step_direction = 1
+
+    case effective_layout_start_direction
+    when "bottom_left", "bottom", "left", "center"
+      x_step_direction = 1 # Iterate from min_x to max_x locally
+      y_step_direction = 1 # Iterate from min_y to max_y locally
+    when "bottom_right", "right"
+      x_step_direction = -1 # Iterate from max_x to min_x locally
+      y_step_direction = 1
+    when "top_left", "top"
+      x_step_direction = 1
+      y_step_direction = -1 # Iterate from max_y to min_y locally
+    when "top_right"
+      x_step_direction = -1
+      y_step_direction = -1
+    end
+
+    {
+      x_step_direction: x_step_direction,
+      y_step_direction: y_step_direction
+    }
+  end
+
+# ... (rest of core.rb) ...
+```
+
+---
+
+### **2. Refactoring `layout_engine.rb` (Updated `generate_layout_for_faces` and `create_unified_layout_for_face`)**
+
+Now, the `LayoutEngine` will first calculate the global start parameters and then pass them to each face's layout generation.
+
+```ruby
+# In cladz_parametrix/layout_engine.rb (within module PARAMETRIX::LayoutEngine)
+
+module PARAMETRIX # Your existing PARAMETRIX module
+  module LayoutEngine
+    # ... (existing @@variables) ...
+
+    # Renamed: Was create_multi_face_unified_layout
+    def self.generate_layout_for_faces(all_faces_data, is_preview = false)
+      model = Sketchup.active_model
+      ents = model.active_entities
+
+      # Initialize global seeds for pattern synchronization
+      @global_length_seed = rand(1_000_000)
+      @global_height_seed = rand(1_000_000)
+
+      # Start an Undo operation
+      op_name = is_preview ? "Parametrix Layout Preview" : "Parametrix Layout"
+      model.start_operation(op_name, true)
+
+      layout_group_parent = is_preview ? ents : model # If not preview, add directly to model entities
+      final_layout_group = layout_group_parent.add_group
+      final_layout_gents = final_layout_group.entities
+
+      begin
+        puts "[PARAMETRIX] 🌍 MULTI-FACE UNIFIED LAYOUT PROCESSING"
+        puts "[PARAMETRIX] ■" * 70
+        puts "[PARAMETRIX] Faces: #{all_faces_data.face_count}"
+        puts "[PARAMETRIX] Mode: UNIFIED (Global top/bottom synchronization)"
+
+        # --- NEW: Calculate Global Unified Start Parameters ONCE for ALL FACES ---
+        global_combined_bounds = PARAMETRIX.calculate_global_unified_bounds(all_faces_data.faces, all_faces_data.matrices)
+        global_layout_start_params = PARAMETRIX.calculate_unified_start_position(global_combined_bounds, @@global_layout_start_direction)
+        # --- END NEW ---
+
+        # Process each face
+        all_faces_data.faces.each_with_index do |face, index|
+          face_matrix = all_faces_data.matrices[index]
+          create_unified_layout_for_face({face: face, matrix: face_matrix}, face_matrix, is_preview, final_layout_gents, global_layout_start_params)
+        end
+
+        # ... (material application, trimming logic)
+        # You'll need to modify your trimming logic to take `final_layout_group` if it doesn't already
+        # Example: if !is_preview && final_layout_group && !all_faces_data.faces.empty?
+        #   PARAMETRIX::Trimming.boolean2d_exact(final_layout_group, all_faces_data.faces.first, all_faces_data.matrices.first)
+        # end
+        # NOTE: Your trimming_v3.rb had a bug selecting from model.selection. Ensure it's fixed
+        # to use the `original_face` parameter as discussed in the previous review.
+
+        model.commit_operation
+        return final_layout_group # Return the generated group/component
+
+      rescue => e
+        puts "[PARAMETRIX] Layout generation failed: #{e.message}"
+        puts e.backtrace
+        model.abort_operation
+        return nil
+      end
+    end
+
+    # This is the core layout generation for a single face, operating in its local layout space,
+    # but now globally aligned.
+    def self.create_unified_layout_for_face(face_data_hash, face_matrix, is_preview, target_entities, global_layout_start_params)
+      face = face_data_hash[:face]
+
+      # Determine face's layout transformations and axes (local to this face)
+      face_transforms = PARAMETRIX.get_face_transformation_matrix_user_logic(face_data_hash, face_matrix)
+      tr_layout_to_world = face_transforms[:tr_layout_to_world]
+      tr_world_to_layout = face_transforms[:tr_world_to_layout] # World coords -> face-local layout coords
+      
+      # Calculate the face's bounds in its local layout space
+      face_layout_bounds = PARAMETRIX.calculate_face_layout_bounds(face, tr_world_to_layout)
+
+      # --- NEW: Integrate Global Alignment ---
+      # 1. Transform the global start point into this face's local layout space
+      global_start_point_local_to_this_face = global_layout_start_params[:start_point_world].transform(tr_world_to_layout)
+      
+      # 2. Determine the local step directions for the layout loops, derived from the global step vectors
+      #    We project the global step vectors onto the face's local layout axes to get the direction.
+      local_x_step_vector = global_layout_start_params[:x_step_direction_world_vector].transform(tr_world_to_layout).normalize
+      local_y_step_vector = global_layout_start_params[:y_step_direction_world_vector].transform(tr_world_to_layout).normalize
+
+      # Determine if we're stepping positively or negatively along the face's local X/Y axis
+      x_step_direction = (local_x_step_vector.x >= 0) ? 1 : -1 # If global_X aligns with local_X (+x) use 1, else -1
+      y_step_direction = (local_y_step_vector.y >= 0) ? 1 : -1 # If global_Y aligns with local_Y (+y) use 1, else -1
+
+      # 3. Initialize current_pos_x and current_pos_y based on the globally aligned start point
+      current_pos_x = global_start_point_local_to_this_face.x
+      current_pos_y = global_start_point_local_to_this_face.y
+      # --- END NEW ---
+
+      min_x_layout = face_layout_bounds.min.x
+      max_x_layout = face_layout_bounds.max.x
+      min_y_layout = face_layout_bounds.min.y
+      max_y_layout = face_layout_bounds.max.y
+
+      # Determine ghosting material based on preview status
+      ghost_material_name = is_preview ? PARAMETRIX::GHOST_MATERIAL_PREVIEW : PARAMETRIX::GHOST_MATERIAL_MAIN_PIECE
+      
+      # Use synchronized seeds if enabled
+      srand(@global_length_seed) if @@synchronize_patterns
+      length_values_raw = PARAMETRIX.parse_multi_values(@@single_row_mode_is_active ? @@single_row_length : @@length)
+      srand(@global_height_seed) if @@synchronize_patterns
+      height_values_raw = PARAMETRIX.parse_multi_values(@@single_row_mode_is_active ? @@single_row_height : @@height)
+
+      length_values = length_values_raw.map { |l| l * PARAMETRIX.get_effective_unit_conversion }
+      height_values = height_values_raw.map { |h| h * PARAMETRIX.get_effective_unit_conversion }
+
+      if length_values.empty? || length_values.all?(&:zero?)
+        puts "[PARAMETRIX] No valid length values, using default."
+        length_values = [PARAMETRIX::DEFAULT_LENGTH * PARAMETRIX.get_effective_unit_conversion]
+      end
+      if height_values.empty? || height_values.all?(&:zero?)
+        puts "[PARAMETRIX] No valid height values, using default."
+        height_values = [PARAMETRIX::DEFAULT_HEIGHT * PARAMETRIX.get_effective_unit_conversion]
+      end
+
+      original_height_values = height_values.dup # Keep for logging
+
+      # Apply joint width initially to the starting position
+      # These offsets should now be applied relative to the globally aligned current_pos_x/y
+      current_pos_x += x_step_direction * @@joint_width_su / 2.0
+      current_pos_y += y_step_direction * @@joint_width_su / 2.0
+
+      # --- Row Generation Loop ---
+      row_count = 0
+      while true
+        # Check if current_pos_y has exceeded bounds based on y_step_direction
+        # This check is now relative to the face's local layout bounds.
+        break if (y_step_direction == 1 && current_pos_y >= max_y_layout - PARAMETRIX::@@tolerance) ||
+                  (y_step_direction == -1 && current_pos_y <= min_y_layout + PARAMETRIX::@@tolerance)
+
+        # Get row height, rotating pattern if needed
+        height_index = (row_count + @@height_pattern_start_index_for_face[face.entityID]) % height_values.length
+        row_height_su = height_values[height_index]
+
+        # Check if there's enough remaining vertical space for this row
+        remaining_vertical_space = (y_step_direction == 1) ? (max_y_layout - current_pos_y) : (current_pos_y - min_y_layout)
+        break if row_height_su > remaining_vertical_space + PARAMETRIX::@@tolerance
+
+        # --- Initialize X position for the current row ---
+        # This should also be based on the globally aligned start, not just initial_layout_params[:start_x]
+        current_row_x = global_start_point_local_to_this_face.x
+        current_row_x += x_step_direction * @@joint_width_su / 2.0 # Apply joint offset
+        
+        # Apply row offset AFTER base start and initial joint offset
+        current_row_x += @@row_offset_x_su * x_step_direction
+        current_row_x += (@@randomize_offset ? (rand(-50..50) * PARAMETRIX.get_effective_unit_conversion) : 0)
+
+        # --- Piece Generation Loop for Current Row ---
+        pieces_in_row = []
+        piece_count_in_row = 0
+        while true
+          # Check if current_row_x has exceeded bounds based on x_step_direction
+          break if (x_step_direction == 1 && current_row_x >= max_x_layout - PARAMETRIX::@@tolerance) ||
+                    (x_step_direction == -1 && current_row_x <= min_x_layout + PARAMETRIX::@@tolerance)
+
+          # Get piece length, rotating pattern if needed
+          piece_length_su = @@randomize_lengths ? length_values.sample : length_values[piece_count_in_row % length_values.length]
+
+          # Check if there's enough remaining horizontal space for this piece
+          remaining_horizontal_space = (x_step_direction == 1) ? (max_x_layout - current_row_x) : (current_row_x - min_x_layout)
+          break if piece_length_su > remaining_horizontal_space + PARAMETRIX::@@tolerance
+
+          # Calculate piece center in layout space (relative to layout_origin_world)
+          piece_center_x_local = current_row_x + x_step_direction * piece_length_su / 2.0
+          piece_center_y_local = current_pos_y + y_step_direction * row_height_su / 2.0
+          piece_center_local = Geom::Point3d.new(piece_center_x_local, piece_center_y_local, 0)
+
+          # Create the piece (this function now transforms to world coordinates internally)
+          piece_group = PARAMETRIX.create_piece_with_ghosting(
+            target_entities,
+            piece_center_local,
+            piece_length_su,
+            row_height_su,
+            @@thickness_su,
+            ghost_material_name,
+            tr_layout_to_world, # Pass the transformation
+            is_preview
+          )
+          pieces_in_row << piece_group if piece_group
+
+          # Update current_row_x for the next piece
+          current_row_x += x_step_direction * (piece_length_su + @@joint_width_su)
+          piece_count_in_row += 1
+        end # End piece loop
+
+        # Update current_pos_y for the next row
+        current_pos_y += y_step_direction * (row_height_su + @@joint_width_su)
+        row_count += 1
+      end # End row loop
+
+      puts "TEST: Direction=#{@@layout_start_direction}, HeightIndex=#{@@height_pattern_start_index}, Elements=#{target_entities.count}, BottomRowHeight=#{original_height_values.first}"
+    end # End create_unified_layout_for_face
+
+    # ... (other methods) ...
+  end # End LayoutEngine
+end # End PARAMETRIX
+```
+
+---
+
+### **Explanation of the Changes for Unified Layouts:**
+
+1.  **`core.rb` - `calculate_global_unified_bounds`:** (Already existed, confirmed its role) This accurately gets the world-axis-aligned bounding box of *all* selected faces.
+2.  **`core.rb` - `calculate_unified_start_position` (Modified):**
+    *   This method now explicitly determines a `start_point_world` (a `Geom::Point3d`) that serves as the **global anchor** for the entire unified layout.
+    *   It also returns `x_step_direction_world_vector` and `y_step_direction_world_vector` (e.g., `X_AXIS` or `X_AXIS.reverse`), which define the **global direction of progression** for the layout grid.
+3.  **`core.rb` - `get_face_local_step_directions` (Renamed/Modified from `calculate_layout_start_position`):**
+    *   This method is now *only* responsible for determining the `x_step_direction` and `y_step_direction` (either `1` or `-1`) for iterating *within a face's local layout space*. It no longer calculates absolute `start_x`/`start_y` as those will be globally derived. This is crucial for fixing the "crazy behavior" you observed when changing `layout_start_direction`.
+4.  **`layout_engine.rb` - `generate_layout_for_faces` (Modified):**
+    *   It now calls `PARAMETRIX.calculate_global_unified_bounds` and `PARAMETRIX.calculate_unified_start_position` **once** to get the global layout parameters.
+    *   These `global_layout_start_params` are then passed down to `create_unified_layout_for_face` for each individual face.
+5.  **`layout_engine.rb` - `create_unified_layout_for_face` (Modified):**
+    *   **Global Start Point:** It takes the `global_layout_start_params` as an argument. The `global_start_point_world` is transformed into *this specific face's local layout space* (`global_start_point_local_to_this_face`). This point then becomes the initial `current_pos_x` and `current_pos_y` for the face's layout.
+    *   **Global Step Directions:** The `global_x_step_direction_world_vector` and `global_y_step_direction_world_vector` are also transformed into the face's local layout space. Their resulting X and Y components determine the `x_step_direction` and `y_step_direction` (1 or -1) for the internal loops. This ensures that even if a face is rotated, its internal layout progression aligns with the global X/Y direction defined by `@@global_layout_start_direction`.
+    *   **Unified Joint Offsets:** The initial `current_pos_x` and `current_pos_y` (which are now globally aligned) correctly account for half the joint width in the appropriate `x_step_direction`/`y_step_direction`.
+    *   **Face-Local Bounds Still Used for Limits:** The `while` loop conditions still check against `min_x_layout`, `max_x_layout`, `min_y_layout`, `max_y_layout` (which are local to each face), ensuring pieces don't go outside that particular face's boundaries.
+
+This approach robustly handles arbitrary face orientations while ensuring that the overall layout across multiple faces is synchronized both in pattern and spatial alignment according to your global settings. This should fix the erratic behavior you observed with different starting directions in multi-face layouts.
+
+Remember to incorporate the namespacing and settings persistence guidance from the initial review as well!
+
+[USER @ 12:35:59 AM]
+Well, you have also pointed to a problem that I have been struggling with and not able to fix it. But you have mentioned it as a potential, uh, problem that I might face due to the problem in the code. For instance, the problem is when I generate a face that has a hole or an opening, the face is not being trimmed and having this hole also in the layout. So, for example, if a face with a square in the middle of that face, the layout being generated is just a one layout covering all the face without the square opening inside the hole. Also, if the layout, if the face is not aligned on the standard axe, for example, if a face is inclined for, uh, 30° to the right side, the layout doesn't uh, is, the layout fails from generating on that face. But the failed layout only if the faces are parallel on the Z-axis. For example, if I have a box and I select all the box and rotate it 35°, for example, the four faces of the box from the right, left, front and back, can get the proper and correct layout aligned with the faces as expected, but the top and bottom faces fails and just get a layout aligned on the access as the just like uh the faces were not rotated, but in fact the face the faces are not aligned with the layouts anymore. The layout is horizontally placed on the axe, but the faces are rotated on their layout. So, any perpendicular face on the ground axis or Z-axis get their layouts correctly oritented on the faces but any parallel face on the ground axis fails.
+
+[MODEL @ 12:35:59 AM]
+Okay, this clarifies two more crucial issues you're facing! These are common pitfalls in SketchUp extension development, especially when dealing with complex geometry and transformations.
+
+Let's tackle them one by one.
+
+---
+
+### Problem 1: Layout Not Respecting Holes/Openings in the Face
+
+**Description:** When a face has an inner loop (a hole), the layout is generated *over* the hole as if it were a solid face, instead of being trimmed around the opening.
+
+**Analysis:**
+This confirms the "CRITICAL BUG" I highlighted in `trimming_v3.rb` in my initial review. Your `PARAMETRIX::Trimming.boolean2d_exact` method currently determines its cutting boundary by iterating `model.selection`. This is problematic for two reasons:
+1.  It uses whatever the user *currently has selected*, not necessarily the `original_face` that the layout was generated for.
+2.  Even if the `original_face` *was* selected, directly using `model.selection` doesn't inherently tell `intersect_with` to create a cutting tool that includes the holes.
+
+The `Sketchup::Entities.intersect_with` method works by taking two sets of entities (or one set and the `self_intersect: true` flag). To use a face with holes as a cutting boundary, you need to create a temporary representation of that face *including its holes* in the context of the `intersect_with` operation.
+
+**Solution:**
+You need to explicitly clone the `original_face` (which can have holes) into a temporary group, and then use the entities within that temporary group as the cutting boundary for `intersect_with`. My previous suggestion of `clone_face_with_holes` helper is exactly what's needed here.
+
+Here's the corrected `trimming.rb` (which should ideally be `cladz_parametrix/trimming.rb` under the new namespacing):
+
+```ruby
+# In cladz_parametrix/trimming.rb (assuming outer module Cladz::Parametrix)
+
+module Cladz
+  module Parametrix
+    module Trimming
+      extend self # Allows calling methods like Cladz::Parametrix::Trimming.boolean2d_exact
+
+      # Performs a 2D boolean intersection to trim the generated layout to the
+      # exact boundary of the original face, including its holes.
+      #
+      # @param layout_group [Sketchup::Group] The group containing the generated layout pieces.
+      # @param original_face [Sketchup::Face] The original face on which the layout was generated.
+      # @param face_matrix [Geom::Transformation] The transformation of the original face's parent.
+      # @return [Sketchup::ComponentInstance] The trimmed layout as a 2D cutting component.
+      def boolean2d_exact(layout_group, original_face, face_matrix)
+        begin
+          model = Sketchup.active_model
+          ents  = model.active_entities
+          
+          # Ensure inputs are valid
+          return layout_group unless model && layout_group && layout_group.valid? && original_face && original_face.valid?
+
+          # Create a temporary group to hold the cutting geometry (a clone of original_face with holes)
+          temp_cutting_group = ents.add_group
+          temp_cutting_gents = temp_cutting_group.entities
+
+          # CRITICAL FIX: Use clone_face_with_holes to create an accurate cutting boundary
+          boundary_face = clone_face_with_holes(temp_cutting_gents, original_face, face_matrix)
+
+          unless boundary_face && boundary_face.valid?
+            temp_cutting_group.erase! rescue nil # Clean up temporary group
+            puts "[CLADZ::PARAMETRIX::Trimming] Failed to create boundary face for trimming. Returning original layout group."
+            return layout_group
+          end
+
+          # Ensure the boundary_face's normal aligns with the original face's normal
+          original_world_normal = original_face.normal.transform(face_matrix)
+          if boundary_face.normal.dot(original_world_normal) < 0.1 # Using a small tolerance
+            boundary_face.reverse!
+          end
+
+          # Perform the intersection
+          # layout_group.entities: the entities to be cut
+          # layout_group.transformation: the transformation of the layout group itself
+          # temp_cutting_gents: the entities of the cutting group (i.e., the boundary_face and its holes)
+          # temp_cutting_group.transformation: the transformation of the cutting group
+          # false: do not delete the cutting entities after intersect_with (we will erase the group)
+          # []: array of entities to ignore
+          layout_group.entities.intersect_with(
+            true, # This is crucial: self_intersect. It causes internal geometry of layout_group to be cut by boundary_face.
+            layout_group.transformation,
+            temp_cutting_gents,
+            temp_cutting_group.transformation,
+            false,
+            []
+          )
+
+          # After intersection, remove pieces of the layout that fall outside the boundary.
+          # We check the center of each face in the layout relative to the cutting boundary.
+          faces_to_remove = []
+          layout_group.entities.grep(Sketchup::Face).each do |f|
+            # Classify point projects the center of the piece's face onto the boundary_face's plane
+            # If it's outside, it means this piece (or part of it) needs to be removed.
+            # This logic needs to be careful: intersect_with should already handle the cuts.
+            # This loop is primarily for removing whole faces that were entirely outside.
+            # For complex cuts, it's better to rely on intersect_with splitting and then deleting the *extra* geometry.
+
+            # More robust check: use the world coordinates of the piece's face
+            face_world_bounds = f.bounds.transform(layout_group.transformation)
+            boundary_face_world_plane = boundary_face.plane.transform(temp_cutting_group.transformation)
+            
+            # Simple check: if the face's center is outside the cutting boundary (projected to 2D)
+            center_in_world = f.bounds.center.transform(layout_group.transformation)
+            
+            # This part needs careful testing. A more robust approach might be to
+            # explicitly identify the 'inside' part of each split face.
+            # For now, let's keep it, but be aware of its limitations.
+            # intersect_with typically creates new edges. You want to keep faces whose normals
+            # point "out" from the desired shape, and delete those pointing "in".
+            # Or simpler: keep only faces that are *inside* the boundary.
+
+            # Re-evaluating this post-intersect_with cleanup:
+            # intersect_with creates new edges along the boundary.
+            # Faces that were originally outside are typically split or fully removed.
+            # We want to remove any leftover faces or parts that are clearly not part of the layout *within* the boundary.
+            # A common strategy is to pick a point known to be inside the original_face,
+            # and check if the centroid of each resulting face is on the same side of the boundary.
+
+            # For now, let's simplify the cleanup based on bounding box overlap after the cut.
+            # This is a basic approach; for truly perfect cleanup, you might need more complex
+            # graph analysis of faces and their loops.
+            # Given that intersect_with handles the splitting, we just need to delete stray geometry.
+
+            # Delete faces whose bounds are entirely outside the cutting boundary's bounds
+            # This is not perfect if a face spans the boundary, but intersect_with should have split it.
+            # It's more about "floating" geometry.
+            
+            # Let's simplify and rely on intersect_with doing its job for the primary cut.
+            # The original logic of removing faces whose centers are outside the *boundary_face* itself (transformed)
+            # is a reasonable first pass for "culling".
+            if boundary_face.classify_point(f.bounds.center) == Sketchup::Face::PointOutside
+                faces_to_remove << f
+            end
+          end
+          layout_group.entities.erase_entities(faces_to_remove) unless faces_to_remove.empty?
+
+          # Clean up any lonely edges (edges not bound by any face)
+          lonely_edges = []
+          layout_group.entities.grep(Sketchup::Edge).each do |edge|
+            lonely_edges << edge if edge.faces.empty?
+          end
+          layout_group.entities.erase_entities(lonely_edges) unless lonely_edges.empty?
+
+          temp_cutting_group.erase! rescue nil # Erase the temporary cutting geometry
+
+          # Convert the resulting group to a 2D cutting component
+          inst = layout_group.to_component
+          defn = inst.definition
+          be = defn.behavior
+          be.is2d = true # Mark as 2D
+          be.cuts_opening = true # Allows it to cut holes in other faces
+          be.snapto = 0 # Can snap to any surface
+          defn.invalidate_bounds # Update bounds after changes
+
+          inst.name = "Parametrix Layout"
+          defn.name = "Parametrix Layout Def"
+
+          return inst
+
+        rescue => e
+          puts "[CLADZ::PARAMETRIX::Trimming] Boolean trimming failed: #{e.message}"
+          puts e.backtrace
+          begin; temp_cutting_group.erase! if temp_cutting_group && temp_cutting_group.valid?; rescue; end
+          return layout_group # Return the untrimmed group if an error occurs
+        end
+      end
+
+      # Helper method to clone a single Sketchup::Face with its holes, applying transformation.
+      # This is crucial for creating the cutting boundary accurately.
+      #
+      # @param target_entities [Sketchup::Entities] The entities collection to add the cloned face to.
+      # @param source_face [Sketchup::Face] The face to clone.
+      # @param face_matrix [Geom::Transformation] The transformation of the source face's parent.
+      # @return [Sketchup::Face, nil] The cloned face, or nil if creation fails.
+      def clone_face_with_holes(target_entities, source_face, face_matrix)
+        # Get outer loop vertices transformed to world space
+        outer_loop_points = source_face.outer_loop.vertices.map { |v| v.position.transform(face_matrix) }
+
+        # Get inner loop (hole) vertices transformed to world space
+        inner_loops_points_arrays = []
+        source_face.loops.each do |loop|
+          unless loop == source_face.outer_loop # Skip the outer loop
+            inner_loop_points = loop.vertices.map { |v| v.position.transform(face_matrix) }
+            inner_loops_points_arrays << inner_loop_points
+          end
+        end
+
+        # Create the face using add_face with an array of point arrays for holes
+        cloned_face = nil
+        if inner_loops_points_arrays.empty?
+          cloned_face = target_entities.add_face(outer_loop_points)
+        else
+          # Add_face can take multiple arrays of points for holes:
+          # target_entities.add_face(outer_loop_points, [hole1_points, hole2_points, ...])
+          cloned_face = target_entities.add_face(outer_loop_points, inner_loops_points_arrays)
+        end
+
+        # Ensure the cloned face's normal is consistent with the original
+        if cloned_face && cloned_face.valid?
+          original_world_normal = source_face.normal.transform(face_matrix)
+          if cloned_face.normal.dot(original_world_normal) < 0
+            cloned_face.reverse!
+          end
+        end
+
+        return cloned_face
+
+      rescue => e
+        puts "[CLADZ::PARAMETRIX::Trimming] Error cloning face with holes: #{e.message}"
+        puts e.backtrace
+        return nil
+      end
+
+    end # module Trimming
+  end # module Parametrix
+end # module Cladz
+```
+
+**Key Improvements for Hole Trimming:**
+*   **`clone_face_with_holes`:** This new helper function is precisely designed to recreate a face, including all its inner loops (holes), in world coordinates.
+*   **`boolean2d_exact` uses `clone_face_with_holes`:** Instead of relying on `model.selection`, `boolean2d_exact` now explicitly creates an accurate representation of the `original_face` (with holes) as its cutting tool.
+*   **`intersect_with(true, ...)`:** The `true` flag for `self_intersect` when combined with the accurate cutting boundary will ensure that the layout pieces are properly split and trimmed around the holes.
+*   **Normal Consistency:** The `boundary_face.normal.dot(original_world_normal) < 0.1` check ensures the cutting face is oriented correctly for `intersect_with`.
+
+---
+
+### Problem 2: Layout Orientation Fails on Horizontal (Z-Parallel) Faces When Rotated
+
+**Description:** When a box is rotated (e.g., 35 degrees), side faces get correctly oriented layouts, but top and bottom faces (whose normals are parallel to the Z-axis) generate layouts that are aligned to the *world X and Y axes*, not to the *rotated orientation of the face itself*.
+
+**Analysis:**
+This confirms my suspicion that the logic for determining the `layout_x_axis_world` and `layout_y_axis_world` within `PARAMETRIX.get_face_transformation_matrix_user_logic` was falling back to world axes under certain conditions where it shouldn't. Specifically, if `@@force_horizontal_layout` is `false` (meaning "align to face"), but the face's own edges or normal led to an ambiguous or degenerate axis calculation, it would default to world X/Y. This is particularly noticeable on horizontal faces because their normal (`Z_AXIS` or `-Z_AXIS`) can easily interact with `X_AXIS` or `Y_AXIS` in ways that might trigger the fallback.
+
+The `if longest_edge_world_vector.length == 0 || longest_edge_world_vector.parallel?(world_face_normal)` check was likely the culprit. For a regular rectangular face, its edges are *never* parallel to its normal, so that condition should almost never be true. However, `longest_edge_world_vector.length == 0` could occur if `max_len` remained zero.
+
+**Solution:**
+We need to refactor `get_face_transformation_matrix_user_logic` to ensure that when `@@force_horizontal_layout` is `false`, it *always* attempts to derive its local axes directly from the face's geometry (e.g., its outer loop edges) in a robust manner, with a very specific and minimal fallback.
+
+Here's the updated `core.rb` (within `Cladz::Parametrix` module):
+
+```ruby
+# In cladz_parametrix/core.rb (within module Cladz::Parametrix)
+
+module Cladz
+  module Parametrix
+    # ... (existing constants and @@variables) ...
+
+    @@tolerance = 0.001.mm # Using a small length to handle floating point inaccuracies
+
+    # This method now returns a comprehensive hash of transformations and axes
+    # that define the face's 'layout space'.
+    # It ensures that layout_x_axis_world and layout_y_axis_world are consistently defined
+    # to point towards positive X and Y in the layout system.
+    #
+    # @@primary_layout_axis is a new setting (formerly @@longest_edge_direction)
+    # It can be 'x_axis_along_face_primary_edge' (default) or 'y_axis_along_face_primary_edge'
+    def self.get_face_transformation_matrix_user_logic(face_data_hash, face_matrix)
+      face = face_data_hash[:face]
+      
+      # Get the face's normal in world coordinates (considering parent transformations)
+      world_face_normal = face.normal.transform(face_matrix)
+
+      layout_x_axis_world = Geom::Vector3d.new(0,0,0)
+      layout_y_axis_world = Geom::Vector3d.new(0,0,0)
+
+      if @@force_horizontal_layout # Layout aligned to world axes, ignoring face's rotation in its plane
+        layout_x_axis_world = X_AXIS
+        layout_y_axis_world = Y_AXIS
+        
+        # Adjust for top/bottom faces if @@force_horizontal_layout is active
+        # The user likely means "align to world X/Y, but respect face normal for Z"
+        # If the face is horizontal (normal is Z_AXIS or -Z_AXIS), X_AXIS and Y_AXIS are fine.
+        # If the face is vertical (normal is X_AXIS or Y_AXIS), then we need to
+        # project X_AXIS/Y_AXIS onto the face's plane.
+        
+        # A simple check for a horizontal face normal:
+        if world_face_normal.parallel?(Z_AXIS) || world_face_normal.parallel?(Z_AXIS.reverse)
+          # For horizontal faces (top/bottom), X_AXIS and Y_AXIS are already on the plane.
+          # No change needed if @@force_horizontal_layout is true.
+          layout_x_axis_world = X_AXIS
+          layout_y_axis_world = Y_AXIS
+        else
+          # For non-horizontal faces, project world X and Y onto the face's plane.
+          # This ensures that the layout axes are still world-aligned *within the plane*
+          # but respect the face's slope.
+          layout_x_axis_world = X_AXIS.project_to_plane(world_face_normal).normalize
+          layout_y_axis_world = Y_AXIS.project_to_plane(world_face_normal).normalize
+          
+          # Re-orthogonalize if necessary (important for consistency)
+          layout_y_axis_world = world_face_normal.cross(layout_x_axis_world).normalize
+          layout_x_axis_world = layout_y_axis_world.cross(world_face_normal).normalize
+        end
+
+      else # Layout aligned to the face's own geometry (this is where the bug was)
+        # --- REVISED ROBUST AXIS DERIVATION ---
+        layout_x_axis_candidate_vec = Geom::Vector3d.new(0,0,0)
+
+        # Try to use the first edge of the outer loop as a primary axis
+        if !face.outer_loop.edges.empty?
+          # Get vector of the first edge of the outer loop, transformed to world space.
+          edge_vec = (face.outer_loop.edges.first.end.position - face.outer_loop.edges.first.start.position).transform(face_matrix)
+          layout_x_axis_candidate_vec = edge_vec.project_to_plane(world_face_normal).normalize
+          
+          # If the projected edge is tiny or degenerate, it means the edge was almost
+          # perpendicular to the plane normal (a degenerate case for a planar face)
+          # or the face geometry is problematic.
+          if layout_x_axis_candidate_vec.length < @@tolerance
+            puts "[CLADZ::PARAMETRIX] WARNING: Projected first outer loop edge is degenerate for face ID #{face.entityID}. Falling back to world X-axis projection."
+            layout_x_axis_candidate_vec = X_AXIS.project_to_plane(world_face_normal).normalize
+          end
+        else
+          # This is a very rare case for a valid face (face with no outer loop edges).
+          # Fallback to world X projected onto the face's plane.
+          puts "[CLADZ::PARAMETRIX] WARNING: Face has no outer loop edges for face ID #{face.entityID}. Falling back to world X-axis projection."
+          layout_x_axis_candidate_vec = X_AXIS.project_to_plane(world_face_normal).normalize
+        end
+        
+        layout_x_axis_world = layout_x_axis_candidate_vec
+
+        # Construct Y-axis orthogonal to X-axis and normal (right-handed system)
+        layout_y_axis_world = world_face_normal.cross(layout_x_axis_world).normalize
+        
+        # Re-orthogonalize X-axis to ensure it's perfectly perpendicular to Y and Z
+        # This fixes potential tiny float errors after cross products
+        layout_x_axis_world = layout_y_axis_world.cross(world_face_normal).normalize
+
+        # Apply @@primary_layout_axis swap if the user desires the primary edge to define the Y-axis
+        if @@primary_layout_axis == 'y_axis_along_face_primary_edge'
+          temp_axis = layout_x_axis_world
+          layout_x_axis_world = layout_y_axis_world
+          layout_y_axis_world = temp_axis
+        end
+      end # End of else (face-aligned layout)
+      
+      # The origin of the layout space in world coordinates
+      # Using the transformed first vertex of the outer loop as a stable origin on the face's plane.
+      layout_origin_world = face.outer_loop.vertices.first.position.transform(face_matrix)
+
+      # Create the transformation from the 'layout space' (where pieces are laid out as (x,y,0)) to world space.
+      tr_layout_to_world = Geom::Transformation.new(layout_origin_world, layout_x_axis_world, layout_y_axis_world, world_face_normal)
+      tr_world_to_layout = tr_layout_to_world.inverse
+
+      {
+        tr_layout_to_world: tr_layout_to_world, # Transforms (x,y,0) in layout space to world
+        tr_world_to_layout: tr_world_to_layout, # Transforms world points to (x,y,z) in layout space
+        layout_x_axis_world: layout_x_axis_world, # X-axis vector in world coordinates
+        layout_y_axis_world: layout_y_axis_world, # Y-axis vector in world coordinates
+        layout_origin_world: layout_origin_world # Origin of layout space in world coordinates
+      }
+    rescue => e
+      puts "[CLADZ::PARAMETRIX] Error in get_face_transformation_matrix_user_logic: #{e.message}"
+      puts e.backtrace
+      # Fallback to identity transformation, though this will likely lead to incorrect layouts.
+      {
+        tr_layout_to_world: Geom::Transformation.new,
+        tr_world_to_layout: Geom::Transformation.new,
+        layout_x_axis_world: X_AXIS,
+        layout_y_axis_world: Y_AXIS,
+        layout_origin_world: Geom::Point3d.new(0,0,0)
+      }
+    end
+
+    # ... (other methods in core.rb remain the same as the previous revision,
+    # including calculate_face_layout_bounds, calculate_global_unified_bounds,
+    # calculate_unified_start_position, get_face_local_step_directions, create_piece_with_ghosting) ...
+
+    # NOTE: You'll need to update your @@longest_edge_direction global variable
+    # to something like @@primary_layout_axis if you want to use the new string for control.
+    # And ensure your UI reflects this.
+    @@primary_layout_axis = 'x_axis_along_face_primary_edge' # Default
+    # ... (add this to your Settings module and read/write defaults) ...
+
+  end # module Parametrix
+end # module Cladz
+```
+
+**Key Improvements for Face Orientation:**
+1.  **Eliminated Ambiguous `longest_edge_world_vector` Fallback:** The problematic `if longest_edge_world_vector.length == 0 || longest_edge_world_vector.parallel?(world_face_normal)` block has been replaced.
+2.  **Robust First Edge Derivation:** When `@@force_horizontal_layout` is `false`, the code now consistently attempts to derive `layout_x_axis_world` from the *first edge of the face's outer loop*. This is a reliable geometric feature.
+3.  **Projection for Planarity:** `edge_vec.project_to_plane(world_face_normal).normalize` ensures the derived axis is perfectly on the face's plane and a unit vector, even if the original edge vector had slight Z-component errors.
+4.  **Degenerate Fallback:** Only if the *projected* edge vector becomes *too small* (e.g., a truly degenerate edge), does it fall back to projecting the world `X_AXIS`. This fallback is now much rarer and signifies genuinely problematic input geometry rather than an orientation issue.
+5.  **Re-orthogonalization:** The `layout_x_axis_world = layout_y_axis_world.cross(world_face_normal).normalize` step ensures a perfectly orthogonal (right-handed) coordinate system, minimizing floating-point errors.
+6.  **`@@force_horizontal_layout` Refinement:** When `@@force_horizontal_layout` is `true`, I've added a check for the face's normal. If it's a horizontal face, it still defaults to world X/Y. But if it's a sloped face, it projects world X/Y *onto that sloped plane*, so the "world-aligned" layout still follows the face's slope. This might align better with user expectations for "force horizontal."
+
+By implementing these changes, especially the robust axis derivation from the outer loop edges, your layouts on top and bottom (Z-parallel) faces of a rotated object should now correctly align with the face's rotation.
+
