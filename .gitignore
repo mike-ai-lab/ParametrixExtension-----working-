@@ -1,0 +1,56 @@
+# SketchUp SDK (large binary files)
+PARAMETRIX_EXTENSION/dev_dir/SketchUpSDK/
+
+# Build directories
+PARAMETRIX_EXTENSION/dev_dir/build/
+PARAMETRIX_EXTENSION/cpp_prototype/build/
+**/build/
+**/out/
+**/dist/
+
+# Node modules
+PARAMETRIX_EXTENSION/node_scripts/node_modules/
+**/node_modules/
+
+# Environment files
+PARAMETRIX_EXTENSION/node_scripts/.env
+**/.env
+
+# Private keys
+*.pem
+private_key.pem
+public_key.pem
+
+# Temporary files
+**/.temp/
+**/.qodo/
+*.tmp
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Compiled files
+*.dll
+*.exe
+*.so
+*.dylib
+*.o
+*.obj
+
+# Large media files
+*.mp4
+*.mov
+*.avi
+
+# Backup files
+*.bak
+*~
