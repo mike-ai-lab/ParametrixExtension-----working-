@@ -4,7 +4,7 @@ require 'sketchup.rb'
 
 # Load main extension components first
 load File.join(__dir__, 'lib', 'PARAMETRIX', 'loader.rb')
-load File.join(__dir__, 'lib', 'PARAMETRIX', 'trimming_v3.rb')
+# Note: trimming_v4_enhanced.rb is loaded by loader.rb
 # TEMPORARY: License managers commented out for testing
 # load File.join(__dir__, 'lib', 'PARAMETRIX', 'license_manager.rb')
 # load File.join(__dir__, 'lib', 'PARAMETRIX', 'trial_manager.rb')
@@ -33,7 +33,11 @@ load File.join(__dir__, 'geometry_diagnostic.rb')
 # end
 
 # TESTING MODE: Extension loaded without license validation
+puts "[PARAMETRIX] ══════════════════════════════════════════════════════════"
+puts "[PARAMETRIX] VERSION: #{PARAMETRIX::PARAMETRIX_EXTENSION_VERSION}"
+puts "[PARAMETRIX] TRIMMING: OOB Method (2D intersect → 3D extrude)"
 puts "[PARAMETRIX] TESTING MODE: License validation bypassed"
+puts "[PARAMETRIX] ══════════════════════════════════════════════════════════"
 
 # Add diagnostic menu item
 if defined?(PARAMETRIX)

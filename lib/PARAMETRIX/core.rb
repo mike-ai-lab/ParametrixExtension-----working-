@@ -3,7 +3,7 @@
 
 module PARAMETRIX
   
-  PARAMETRIX_EXTENSION_VERSION = "1.0"
+  PARAMETRIX_EXTENSION_VERSION = "1.0_OOB_TRIM_V7"
   
   # --- Multi-Row Layout Parameters ---
   @@length = "800;900;1000;1100;1200"
@@ -738,44 +738,23 @@ module PARAMETRIX
     begin
       face_element = face_group.entities.add_face(world_points)
       if face_element
-        # Store for later boolean trimming
-        face_element.set_attribute('PARAMETRIX_DATA', 'needs_trimming', original_face && original_face.outer_loop.vertices.length > 4)
-        face_element.set_attribute('PARAMETRIX_DATA', 'original_face', original_face) if original_face
-        face_element.set_attribute('PARAMETRIX_DATA', 'face_matrix', face_matrix) if face_matrix
-        
-        # Use random thickness if enabled, otherwise use provided thickness
+        # Store thickness data for LATER extrusion (after 2D trimming)
         final_thickness = use_random_thickness ? get_random_thickness(unit_conversion, single_row_mode) : thickness_su
         
         if is_preview
-          # FIXED: Create 3D preview with reduced thickness for better visualization
-          preview_thickness = final_thickness * 0.5  # Use half thickness for preview
+          preview_thickness = final_thickness * 0.5
+          face_element.set_attribute('PARAMETRIX_DATA', 'thickness', preview_thickness)
           face_element.material = "#AAAAAA"
           face_element.back_material = "#AAAAAA"
-          
-          if preview_thickness > 0.001
-            layout_normal = face_element.normal
-            if layout_normal.samedirection?(original_normal)
-              pushpull_distance = -preview_thickness
-            else
-              pushpull_distance = preview_thickness
-            end
-            face_element.pushpull(pushpull_distance)
-          end
         else
+          face_element.set_attribute('PARAMETRIX_DATA', 'thickness', final_thickness)
           face_element.material = materials.first
           face_element.back_material = materials.first
-          
-          if final_thickness > 0.001
-            layout_normal = face_element.normal
-            if layout_normal.samedirection?(original_normal)
-              pushpull_distance = -final_thickness
-            else
-              pushpull_distance = final_thickness
-            end
-            face_element.pushpull(pushpull_distance)
-          end
         end
         
+        face_element.set_attribute('PARAMETRIX_DATA', 'original_normal', original_normal)
+        
+        # NO PUSHPULL HERE - Return 2D face for trimming first
         return true
       end
     rescue => e
@@ -1010,6 +989,9 @@ module PARAMETRIX
   def self.create_rails_for_face(face_data, main_group, rail_material, unit_conversion, face_index, cavity_distance_su, all_faces_data, local_bounds, face_transform, original_normal, single_row_mode, stone_min_y_for_rails, stone_max_y_for_rails, joint_width_su, top_row_joints = [], bottom_row_joints = [])
     return unless @@enable_top_rail || @@enable_bottom_rail || @@enable_left_rail || @@enable_right_rail
 
+    # Use the local_bounds parameter (which contains trimmed bounds after boolean operation)
+    actual_local_bounds = local_bounds
+
     top_rail_thickness_su = @@top_rail_thickness * unit_conversion
     top_rail_depth_su = @@top_rail_depth * unit_conversion
     bottom_rail_thickness_su = @@bottom_rail_thickness * unit_conversion
@@ -1026,18 +1008,18 @@ module PARAMETRIX
       top_rail_group.name = "Top_Rail_Face_#{face_index + 1}"
       
       if @@layout_start_direction == "top" || @@layout_start_direction == "top_left" || @@layout_start_direction == "top_right"
-        rail_y_pos = stone_max_y_for_rails + joint_width_su
+        rail_y_pos = actual_local_bounds.max.y + joint_width_su
       else
-        rail_y_pos = stone_max_y_for_rails
+        rail_y_pos = actual_local_bounds.max.y
       end
-      
+
       rail_segments = []
       if @@split_rails && !top_row_joints.empty?
         top_row_joints.each do |joint|
           rail_segments << { start: joint[:start], end: joint[:end] }
         end
       else
-        rail_segments << { start: local_bounds.min.x, end: local_bounds.max.x }
+        rail_segments << { start: actual_local_bounds.min.x, end: actual_local_bounds.max.x }
       end
 
       rail_segments.each do |segment|
@@ -1080,16 +1062,16 @@ module PARAMETRIX
     if @@enable_bottom_rail
       bottom_rail_group = main_group.entities.add_group
       bottom_rail_group.name = "Bottom_Rail_Face_#{face_index + 1}"
-      
-      rail_y_pos = stone_min_y_for_rails - bottom_rail_thickness_su
-      
+
+      rail_y_pos = actual_local_bounds.min.y - bottom_rail_thickness_su
+
       rail_segments = []
       if @@split_rails && !bottom_row_joints.empty?
         bottom_row_joints.each do |joint|
           rail_segments << { start: joint[:start], end: joint[:end] }
         end
       else
-        rail_segments << { start: local_bounds.min.x, end: local_bounds.max.x }
+        rail_segments << { start: actual_local_bounds.min.x, end: actual_local_bounds.max.x }
       end
 
       rail_segments.each do |segment|
@@ -1132,12 +1114,12 @@ module PARAMETRIX
     if @@enable_left_rail
       left_rail_group = main_group.entities.add_group
       left_rail_group.name = "Left_Rail_Face_#{face_index + 1}"
-      
+
       rail_segments = []
       if @@split_rails
         rail_segments << { start: stone_min_y_for_rails, end: stone_max_y_for_rails }
       else
-        rail_segments << { start: local_bounds.min.y, end: local_bounds.max.y }
+        rail_segments << { start: actual_local_bounds.min.y, end: actual_local_bounds.max.y }
       end
 
       rail_segments.each do |segment|
@@ -1145,7 +1127,7 @@ module PARAMETRIX
         rail_end_y = segment[:end]
         next if (rail_end_y - rail_start_y).abs < 0.001
 
-        rail_x_pos = local_bounds.min.x - left_rail_thickness_su
+        rail_x_pos = actual_local_bounds.min.x - left_rail_thickness_su
 
         local_rail_points = [
           Geom::Point3d.new(rail_x_pos, rail_start_y, 0),
@@ -1182,12 +1164,12 @@ module PARAMETRIX
     if @@enable_right_rail
       right_rail_group = main_group.entities.add_group
       right_rail_group.name = "Right_Rail_Face_#{face_index + 1}"
-      
+
       rail_segments = []
       if @@split_rails
         rail_segments << { start: stone_min_y_for_rails, end: stone_max_y_for_rails }
       else
-        rail_segments << { start: local_bounds.min.y, end: local_bounds.max.y }
+        rail_segments << { start: actual_local_bounds.min.y, end: actual_local_bounds.max.y }
       end
 
       rail_segments.each do |segment|
@@ -1195,7 +1177,7 @@ module PARAMETRIX
         rail_end_y = segment[:end]
         next if (rail_end_y - rail_start_y).abs < 0.001
 
-        rail_x_pos = local_bounds.max.x
+        rail_x_pos = actual_local_bounds.max.x
 
         local_rail_points = [
           Geom::Point3d.new(rail_x_pos, rail_start_y, 0),
