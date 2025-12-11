@@ -9,6 +9,79 @@ module PARAMETRIX_TRIMMING_V4
     VERSION
   end
 
+  def self.trim_openings_only(layout_group, original_face, face_matrix = nil)
+    begin
+      puts "[V8.2] Trimming openings only..."
+      return layout_group unless original_face.loops.length > 1
+      
+      model = Sketchup.active_model
+      return layout_group unless model && layout_group && original_face
+
+      if layout_group.is_a?(Sketchup::Group)
+        layout_ents = layout_group.entities
+        layout_transform = layout_group.transformation
+      elsif layout_group.is_a?(Sketchup::ComponentInstance)
+        layout_ents = layout_group.definition.entities
+        layout_transform = layout_group.transformation
+      else
+        return layout_group
+      end
+
+      # Get layout plane from first face
+      sample_face = layout_ents.grep(Sketchup::Face).first
+      layout_plane = sample_face ? sample_face.plane : [Geom::Point3d.new(0,0,0), Geom::Vector3d.new(0,0,1)]
+
+      # Create only inner loops (holes) for trimming
+      world_to_local = layout_transform.inverse
+      
+      # Process each inner loop (hole)
+      original_face.loops[1..-1].each_with_index do |loop, hole_index|
+        hole_group = layout_ents.add_group
+        hole_ents = hole_group.entities
+        
+        hole_points = loop.vertices.map do |v|
+          p = v.position
+          p = p.transform(face_matrix) if face_matrix && face_matrix != Geom::Transformation.new
+          p_local = p.transform(world_to_local)
+          p_local.project_to_plane(layout_plane)
+        end
+        
+        hole_face = hole_ents.add_face(hole_points)
+        next unless hole_face && hole_face.valid?
+        
+        # Intersect with hole
+        tr = Geom::Transformation.new
+        gptr = hole_group.transformation
+        layout_ents.intersect_with(false, gptr, layout_ents, tr, false, [hole_group])
+        
+        # Remove faces inside hole using center point test
+        faces_to_remove = []
+        layout_ents.grep(Sketchup::Face).each do |face|
+          pt = face.bounds.center.project_to_plane(hole_face.plane)
+          classification = hole_face.classify_point(pt)
+          if classification != Sketchup::Face::PointOutside
+            faces_to_remove << face
+          end
+        end
+        layout_ents.erase_entities(faces_to_remove) unless faces_to_remove.empty?
+        
+        hole_group.erase!
+        
+        # Remove orphaned edges (edges with no faces)
+        orphan_edges = layout_ents.grep(Sketchup::Edge).select { |e| e.faces.empty? }
+        layout_ents.erase_entities(orphan_edges) unless orphan_edges.empty?
+        
+        puts "[V8.2] Hole #{hole_index + 1} trimmed"
+      end
+      
+      return layout_group
+      
+    rescue => e
+      puts "[V8.2] Opening trim error: #{e.message}"
+      return layout_group
+    end
+  end
+
   def self.boolean2d_exact(layout_group, original_face, face_matrix = nil)
     begin
       puts "[V8.2] Starting cookie-cutter trim..."
@@ -30,18 +103,18 @@ module PARAMETRIX_TRIMMING_V4
       face_count = original_faces.length
       puts "[V8.2] Layout has #{face_count} faces before trimming"
       
-      # Get layout Z level
+      # Get layout plane from first face
       sample_face = original_faces.first
-      layout_z = sample_face ? sample_face.vertices.first.position.z : 0.0
-      puts "[V8.2] Layout local Z: #{layout_z.round(4)}"
+      layout_plane = sample_face ? sample_face.plane : [Geom::Point3d.new(0,0,0), Geom::Vector3d.new(0,0,1)]
+      puts "[V8.2] Layout plane: #{layout_plane.inspect}"
 
-      # Create boundary INSIDE the layout group
+      # Create boundary from original face
       world_to_local = layout_transform.inverse
       outer_points = original_face.outer_loop.vertices.map do |v|
         p = v.position
         p = p.transform(face_matrix) if face_matrix && face_matrix != Geom::Transformation.new
         p_local = p.transform(world_to_local)
-        Geom::Point3d.new(p_local.x, p_local.y, layout_z)
+        p_local.project_to_plane(layout_plane)
       end
 
       # Create temp boundary group inside layout
@@ -64,7 +137,7 @@ module PARAMETRIX_TRIMMING_V4
             p = v.position
             p = p.transform(face_matrix) if face_matrix && face_matrix != Geom::Transformation.new
             p_local = p.transform(world_to_local)
-            Geom::Point3d.new(p_local.x, p_local.y, layout_z)
+            p_local.project_to_plane(layout_plane)
           end
           hole_face = boundary_ents.add_face(hole_points)
           hole_face.erase! if hole_face && hole_face.valid?

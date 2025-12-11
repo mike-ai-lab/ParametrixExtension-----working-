@@ -98,29 +98,23 @@ module PARAMETRIX
         body {
             font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
             background: #ffffff;
-            border-radius: 12px;
-            box-shadow: 0 4px 24px rgba(0, 0, 0, 0.08);
-            border: 1px solid #e5e7eb;
             display: flex;
             flex-direction: column;
-            overflow: hidden;
-            width: 100%;
-            max-width: 400px;
-            max-height: calc(100vh - 20px);
-            margin: 10px;
+            height: 100vh;
+            margin: 0;
+            padding: 0;
         }
 
         .content-area {
             overflow-y: auto;
-            padding: 12px;
-            flex-grow: 1;
+            padding: 16px;
+            flex: 1;
         }
         .dialog-footer {
-            padding: 8px 12px;
+            padding: 12px 16px;
             background: #f8f9fa;
-            border-top: 1px solid #e9ecef;
-            border-bottom-left-radius: 12px;
-            border-bottom-right-radius: 12px;
+            border-top: 1px solid #e0e0e0;
+            flex-shrink: 0;
         }
         .setting-group {
             margin-bottom: 12px;
@@ -449,12 +443,9 @@ module PARAMETRIX
     
     <!-- Fixed Action Buttons Footer -->
     <div class="dialog-footer">
-        <div class="flex justify-between items-center w-full">
-            <button id="helpBtn" class="w-6 h-6 bg-gray-100 text-gray-600 text-sm rounded-full hover:bg-gray-200 transition flex items-center justify-center" title="Help & Documentation">?</button>
-            <div class="flex gap-2">
-                <button id="previewBtn" class="px-4 py-2 bg-gray-100 text-gray-700 font-medium rounded-lg hover:bg-gray-200 transition text-xs">Preview</button>
-                <button id="generateBtn" class="px-4 py-2 bg-blue-500 text-white font-medium rounded-lg hover:bg-blue-600 transition text-xs">Generate</button>
-            </div>
+        <div class="flex justify-center items-center gap-3 w-full">
+            <button id="previewBtn" class="px-6 py-2 bg-gray-600 text-white font-semibold rounded-lg hover:bg-gray-700 transition text-sm">Preview</button>
+            <button id="generateBtn" class="px-6 py-2 bg-blue-600 text-white font-semibold rounded-lg hover:bg-blue-700 transition text-sm">Generate</button>
         </div>
     </div>
 

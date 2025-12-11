@@ -1,14 +1,8 @@
-# PARAMETRIX Layout Generator Extension
-require 'sketchup.rb'
-
-# Clear cached modules
+# Quick reload for mitered rails testing
 Object.send(:remove_const, :PARAMETRIX) if defined?(PARAMETRIX)
 Object.send(:remove_const, :PARAMETRIX_TRIMMING_V4) if defined?(PARAMETRIX_TRIMMING_V4)
 Object.send(:remove_const, :CladzPARAMETRIXMultiFacePosition) if defined?(CladzPARAMETRIXMultiFacePosition)
 
-# Load all components
-load File.join(__dir__, 'lib', 'PARAMETRIX', 'loader.rb')
+load File.join(__dir__, 'PARAMETRIX.rb')
 
-puts "[PARAMETRIX] Mitered Rails Implementation Loaded"
-
-file_loaded(__FILE__)
+puts "[RELOAD] Mitered rails version loaded successfully"

@@ -520,13 +520,12 @@ module PARAMETRIX
     local_bounds = Geom::BoundingBox.new
     vertices.each { |pt| local_bounds.add(pt) }
 
-    # Apply corner extension using cavity distance for proper connections
+    # Apply corner extension: cavity_distance - thickness to compensate for gap
     if @@preserve_corners && cavity_distance_su > 0.001
-      if corner_type == "internal"
-        corner_extension = cavity_distance_su * 0.75
-      else
-        corner_extension = cavity_distance_su * 1.0
-      end
+      unit_conversion = get_effective_unit_conversion
+      thickness_su = @@single_row_mode ? @@single_row_thickness * unit_conversion : @@thickness * unit_conversion
+      corner_extension = cavity_distance_su - thickness_su
+      corner_extension = [corner_extension, 0.0].max
 
       extended_bounds = Geom::BoundingBox.new
       extended_bounds.add([
@@ -986,11 +985,119 @@ module PARAMETRIX
     PARAMETRIX::SupportDialog.show
   end
 
-  def self.create_rails_for_face(face_data, main_group, rail_material, unit_conversion, face_index, cavity_distance_su, all_faces_data, local_bounds, face_transform, original_normal, single_row_mode, stone_min_y_for_rails, stone_max_y_for_rails, joint_width_su, top_row_joints = [], bottom_row_joints = [])
-    return unless @@enable_top_rail || @@enable_bottom_rail || @@enable_left_rail || @@enable_right_rail
+  def self.detect_rail_end_corner_type(local_pt, rail_orientation, local_bounds, tolerance = 0.1)
+    at_left = (local_pt.x - local_bounds.min.x).abs < tolerance
+    at_right = (local_pt.x - local_bounds.max.x).abs < tolerance
+    at_bottom = (local_pt.y - local_bounds.min.y).abs < tolerance
+    at_top = (local_pt.y - local_bounds.max.y).abs < tolerance
+    
+    case rail_orientation
+    when :top
+      return :external_miter if at_left || at_right
+    when :bottom
+      return :external_miter if at_left || at_right
+    when :left
+      return :external_miter if at_top || at_bottom
+    when :right
+      return :external_miter if at_top || at_bottom
+    end
+    
+    :butt_end
+  end
 
-    # Use the local_bounds parameter (which contains trimmed bounds after boolean operation)
-    actual_local_bounds = local_bounds
+  def self.create_mitered_rail_points(edge_data, rail_start_y, rail_end_y, rail_thickness, local_bounds, is_horizontal)
+    local_p1 = edge_data[:local_p1]
+    local_p2 = edge_data[:local_p2]
+    orientation = edge_data[:orientation]
+    
+    if is_horizontal
+      p1 = Geom::Point3d.new(local_p1.x, rail_start_y, 0)
+      p2 = Geom::Point3d.new(local_p2.x, rail_start_y, 0)
+      p3 = Geom::Point3d.new(local_p2.x, rail_end_y, 0)
+      p4 = Geom::Point3d.new(local_p1.x, rail_end_y, 0)
+      
+      left_corner = detect_rail_end_corner_type(local_p1, orientation, local_bounds)
+      right_corner = detect_rail_end_corner_type(local_p2, orientation, local_bounds)
+      
+      if left_corner == :external_miter
+        if orientation == :top
+          p4 = Geom::Point3d.new(local_p1.x + rail_thickness, rail_end_y, 0)
+        else
+          p1 = Geom::Point3d.new(local_p1.x + rail_thickness, rail_start_y, 0)
+        end
+      end
+      
+      if right_corner == :external_miter
+        if orientation == :top
+          p3 = Geom::Point3d.new(local_p2.x - rail_thickness, rail_end_y, 0)
+        else
+          p2 = Geom::Point3d.new(local_p2.x - rail_thickness, rail_start_y, 0)
+        end
+      end
+    else
+      p1 = Geom::Point3d.new(rail_start_y, local_p1.y, 0)
+      p2 = Geom::Point3d.new(rail_start_y, local_p2.y, 0)
+      p3 = Geom::Point3d.new(rail_end_y, local_p2.y, 0)
+      p4 = Geom::Point3d.new(rail_end_y, local_p1.y, 0)
+      
+      bottom_corner = detect_rail_end_corner_type(local_p1, orientation, local_bounds)
+      top_corner = detect_rail_end_corner_type(local_p2, orientation, local_bounds)
+      
+      if bottom_corner == :external_miter
+        if orientation == :left
+          p1 = Geom::Point3d.new(rail_start_y, local_p1.y + rail_thickness, 0)
+        else
+          p4 = Geom::Point3d.new(rail_end_y, local_p1.y + rail_thickness, 0)
+        end
+      end
+      
+      if top_corner == :external_miter
+        if orientation == :left
+          p2 = Geom::Point3d.new(rail_start_y, local_p2.y - rail_thickness, 0)
+        else
+          p3 = Geom::Point3d.new(rail_end_y, local_p2.y - rail_thickness, 0)
+        end
+      end
+    end
+    
+    [p1, p2, p3, p4]
+  end
+
+  def self.find_perpendicular_face_at_corner(face_data, all_faces_data, corner_edge_local, face_transform)
+    # Check if this corner edge connects to a perpendicular face
+    face = face_data[:face]
+    face_matrix = face_data[:matrix]
+    face_normal = face.normal.transform(face_matrix)
+    
+    all_faces_data.each do |other_data|
+      next if other_data[:face] == face
+      other_normal = other_data[:face].normal.transform(other_data[:matrix])
+      
+      # Check if perpendicular (dot product near 0)
+      if (face_normal.dot(other_normal)).abs < 0.1
+        # Check if they share an edge in world space
+        world_p1 = corner_edge_local[:local_p1].transform(face_transform)
+        world_p2 = corner_edge_local[:local_p2].transform(face_transform)
+        
+        other_data[:face].edges.each do |other_edge|
+          other_p1 = other_edge.start.position.transform(other_data[:matrix])
+          other_p2 = other_edge.end.position.transform(other_data[:matrix])
+          
+          # Check if edges share vertices (within tolerance)
+          if (world_p1.distance(other_p1) < 1.0 || world_p1.distance(other_p2) < 1.0) &&
+             (world_p2.distance(other_p1) < 1.0 || world_p2.distance(other_p2) < 1.0)
+            return true
+          end
+        end
+      end
+    end
+    false
+  end
+
+  def self.create_rails_for_face(face_data, main_group, face_group, rail_material, unit_conversion, face_index, cavity_distance_su, all_faces_data, local_bounds, face_transform, original_normal, single_row_mode, stone_min_y_for_rails, stone_max_y_for_rails, joint_width_su)
+    puts "[RAILS] create_rails_for_face called for face #{face_index + 1}"
+    puts "[RAILS] Enabled: top=#{@@enable_top_rail}, bottom=#{@@enable_bottom_rail}, left=#{@@enable_left_rail}, right=#{@@enable_right_rail}"
+    return nil unless @@enable_top_rail || @@enable_bottom_rail || @@enable_left_rail || @@enable_right_rail
 
     top_rail_thickness_su = @@top_rail_thickness * unit_conversion
     top_rail_depth_su = @@top_rail_depth * unit_conversion
@@ -1002,216 +1109,246 @@ module PARAMETRIX
     right_rail_depth_su = @@right_rail_depth * unit_conversion
 
     created_rails = []
+    inv_transform = face_transform.inverse
+
+    layout_ents = face_group.is_a?(Sketchup::ComponentInstance) ? face_group.definition.entities : face_group.entities
+    trimmed_faces = layout_ents.grep(Sketchup::Face)
+    puts "[RAILS] Found #{trimmed_faces.length} trimmed faces"
+    return nil if trimmed_faces.empty?
+
+    all_edges = []
+    trimmed_faces.each { |f| all_edges.concat(f.edges) }
+    all_edges.uniq!
+    puts "[RAILS] Found #{all_edges.length} unique edges"
+
+    # RECALCULATE actual stone bounds from trimmed faces
+    actual_min_y = Float::INFINITY
+    actual_max_y = -Float::INFINITY
+    actual_min_x = Float::INFINITY
+    actual_max_x = -Float::INFINITY
+    
+    trimmed_faces.each do |face|
+      face.vertices.each do |vertex|
+        local_pt = vertex.position.transform(inv_transform)
+        actual_min_y = [actual_min_y, local_pt.y].min
+        actual_max_y = [actual_max_y, local_pt.y].max
+        actual_min_x = [actual_min_x, local_pt.x].min
+        actual_max_x = [actual_max_x, local_pt.x].max
+      end
+    end
+    
+    puts "[RAILS] Actual stone bounds: x=[#{actual_min_x.round(2)}, #{actual_max_x.round(2)}], y=[#{actual_min_y.round(2)}, #{actual_max_y.round(2)}]"
+    puts "[RAILS] Input stone bounds: y=[#{stone_min_y_for_rails.round(2)}, #{stone_max_y_for_rails.round(2)}]"
+
+    classified_edges = []
+    all_edges.each do |edge|
+      local_p1 = edge.start.position.transform(inv_transform)
+      local_p2 = edge.end.position.transform(inv_transform)
+      
+      dir = (local_p2 - local_p1).normalize
+      angle = Math.atan2(dir.y, dir.x) * 180 / Math::PI
+      angle = angle % 360
+      
+      orientation = if angle.between?(45, 135)
+        :top
+      elsif angle.between?(225, 315)
+        :bottom
+      elsif angle.between?(135, 225)
+        :left
+      else
+        :right
+      end
+      
+      classified_edges << { local_p1: local_p1, local_p2: local_p2, orientation: orientation }
+    end
+
+    # Debug: Show edge orientation distribution
+    orientation_count = { top: 0, bottom: 0, left: 0, right: 0 }
+    classified_edges.each { |e| orientation_count[e[:orientation]] += 1 }
+    puts "[RAILS] Edge orientation distribution: #{orientation_count.inspect}"
 
     if @@enable_top_rail
-      top_rail_group = main_group.entities.add_group
-      top_rail_group.name = "Top_Rail_Face_#{face_index + 1}"
+      top_edges = classified_edges.select { |e| 
+        (e[:local_p1].y - actual_max_y).abs < 0.5 || (e[:local_p2].y - actual_max_y).abs < 0.5
+      }
+      puts "[RAILS] Top rail: found #{top_edges.length} edges at y=#{actual_max_y.round(2)}"
       
-      if @@layout_start_direction == "top" || @@layout_start_direction == "top_left" || @@layout_start_direction == "top_right"
-        rail_y_pos = actual_local_bounds.max.y + joint_width_su
-      else
-        rail_y_pos = actual_local_bounds.max.y
-      end
-
-      rail_segments = []
-      if @@split_rails && !top_row_joints.empty?
-        top_row_joints.each do |joint|
-          rail_segments << { start: joint[:start], end: joint[:end] }
-        end
-      else
-        rail_segments << { start: actual_local_bounds.min.x, end: actual_local_bounds.max.x }
-      end
-
-      rail_segments.each do |segment|
-        rail_start_x = segment[:start]
-        rail_end_x = segment[:end]
-        next if (rail_end_x - rail_start_x).abs < 0.001
-
-        local_rail_points = [
-          Geom::Point3d.new(rail_start_x, rail_y_pos, 0),
-          Geom::Point3d.new(rail_end_x, rail_y_pos, 0),
-          Geom::Point3d.new(rail_end_x, rail_y_pos + top_rail_thickness_su, 0),
-          Geom::Point3d.new(rail_start_x, rail_y_pos + top_rail_thickness_su, 0)
-        ]
-        
-        world_rail_points = local_rail_points.map { |pt| pt.transform(face_transform) }
-        
-        begin
-          rail_face = top_rail_group.entities.add_face(world_rail_points)
-          if rail_face
-            rail_face.material = rail_material
-            rail_face.back_material = rail_material
-            
-            rail_normal = rail_face.normal
-            if rail_normal.samedirection?(original_normal)
-              pushpull_distance = -top_rail_depth_su
-            else
-              pushpull_distance = top_rail_depth_su
-            end
-            rail_face.pushpull(pushpull_distance)
+      # Group continuous edges
+      continuous_segments = []
+      top_edges.sort_by { |e| [e[:local_p1].x, e[:local_p2].x].min }.each do |edge_data|
+        if continuous_segments.empty?
+          continuous_segments << [edge_data]
+        else
+          last_segment = continuous_segments.last
+          last_edge = last_segment.last
+          gap = [edge_data[:local_p1].x, edge_data[:local_p2].x].min - [last_edge[:local_p1].x, last_edge[:local_p2].x].max
+          
+          if gap < 1.0
+            last_segment << edge_data
+          else
+            continuous_segments << [edge_data]
           end
-        rescue => e
         end
       end
       
-      top_rail_comp = top_rail_group.to_component
-      top_rail_comp.name = "Top_Rail_Face_#{face_index + 1}"
-      created_rails << top_rail_comp
+      continuous_segments.each do |segment|
+        min_x = segment.map { |e| [e[:local_p1].x, e[:local_p2].x].min }.min
+        max_x = segment.map { |e| [e[:local_p1].x, e[:local_p2].x].max }.max
+        
+        # Check corners for perpendicular faces
+        left_has_perp = find_perpendicular_face_at_corner(face_data, all_faces_data, 
+          {local_p1: Geom::Point3d.new(min_x, actual_max_y, 0), local_p2: Geom::Point3d.new(min_x, actual_max_y, 0)}, face_transform)
+        right_has_perp = find_perpendicular_face_at_corner(face_data, all_faces_data,
+          {local_p1: Geom::Point3d.new(max_x, actual_max_y, 0), local_p2: Geom::Point3d.new(max_x, actual_max_y, 0)}, face_transform)
+        
+        rail_start_y = actual_max_y + joint_width_su
+        rail_end_y = rail_start_y + top_rail_thickness_su
+        
+        p1 = Geom::Point3d.new(min_x, rail_start_y, 0)
+        p2 = Geom::Point3d.new(max_x, rail_start_y, 0)
+        p3 = Geom::Point3d.new(max_x, rail_end_y, 0)
+        p4 = Geom::Point3d.new(min_x, rail_end_y, 0)
+        
+        # Extend at corners with perpendicular faces
+        if left_has_perp
+          p1 = Geom::Point3d.new(min_x - top_rail_thickness_su, rail_start_y, 0)
+          p4 = Geom::Point3d.new(min_x - top_rail_thickness_su, rail_end_y, 0)
+        end
+        if right_has_perp
+          p2 = Geom::Point3d.new(max_x + top_rail_thickness_su, rail_start_y, 0)
+          p3 = Geom::Point3d.new(max_x + top_rail_thickness_su, rail_end_y, 0)
+        end
+        
+        rail_group = main_group.entities.add_group
+        rail_face = rail_group.entities.add_face([p1, p2, p3, p4].map { |pt| pt.transform(face_transform) }) rescue nil
+        if rail_face
+          rail_face.material = rail_material
+          rail_face.back_material = rail_material
+          pushpull_dist = rail_face.normal.samedirection?(original_normal) ? -top_rail_depth_su : top_rail_depth_su
+          rail_face.pushpull(pushpull_dist) rescue nil
+          created_rails << rail_group.to_component
+        else
+          rail_group.erase!
+        end
+      end
     end
 
     if @@enable_bottom_rail
-      bottom_rail_group = main_group.entities.add_group
-      bottom_rail_group.name = "Bottom_Rail_Face_#{face_index + 1}"
-
-      rail_y_pos = actual_local_bounds.min.y - bottom_rail_thickness_su
-
-      rail_segments = []
-      if @@split_rails && !bottom_row_joints.empty?
-        bottom_row_joints.each do |joint|
-          rail_segments << { start: joint[:start], end: joint[:end] }
-        end
-      else
-        rail_segments << { start: actual_local_bounds.min.x, end: actual_local_bounds.max.x }
-      end
-
-      rail_segments.each do |segment|
-        rail_start_x = segment[:start]
-        rail_end_x = segment[:end]
-        next if (rail_end_x - rail_start_x).abs < 0.001
-
-        local_rail_points = [
-          Geom::Point3d.new(rail_start_x, rail_y_pos, 0),
-          Geom::Point3d.new(rail_end_x, rail_y_pos, 0),
-          Geom::Point3d.new(rail_end_x, rail_y_pos + bottom_rail_thickness_su, 0),
-          Geom::Point3d.new(rail_start_x, rail_y_pos + bottom_rail_thickness_su, 0)
-        ]
-        
-        world_rail_points = local_rail_points.map { |pt| pt.transform(face_transform) }
-        
-        begin
-          rail_face = bottom_rail_group.entities.add_face(world_rail_points)
-          if rail_face
-            rail_face.material = rail_material
-            rail_face.back_material = rail_material
-            
-            rail_normal = rail_face.normal
-            if rail_normal.samedirection?(original_normal)
-              pushpull_distance = -bottom_rail_depth_su
-            else
-              pushpull_distance = bottom_rail_depth_su
-            end
-            rail_face.pushpull(pushpull_distance)
+      bottom_edges = classified_edges.select { |e| 
+        (e[:local_p1].y - actual_min_y).abs < 0.5 || (e[:local_p2].y - actual_min_y).abs < 0.5
+      }
+      puts "[RAILS] Bottom rail: found #{bottom_edges.length} edges at y=#{actual_min_y.round(2)}"
+      
+      continuous_segments = []
+      bottom_edges.sort_by { |e| [e[:local_p1].x, e[:local_p2].x].min }.each do |edge_data|
+        if continuous_segments.empty?
+          continuous_segments << [edge_data]
+        else
+          last_segment = continuous_segments.last
+          last_edge = last_segment.last
+          gap = [edge_data[:local_p1].x, edge_data[:local_p2].x].min - [last_edge[:local_p1].x, last_edge[:local_p2].x].max
+          
+          if gap < 1.0
+            last_segment << edge_data
+          else
+            continuous_segments << [edge_data]
           end
-        rescue => e
         end
       end
       
-      bottom_rail_comp = bottom_rail_group.to_component
-      bottom_rail_comp.name = "Bottom_Rail_Face_#{face_index + 1}"
-      created_rails << bottom_rail_comp
+      continuous_segments.each do |segment|
+        min_x = segment.map { |e| [e[:local_p1].x, e[:local_p2].x].min }.min
+        max_x = segment.map { |e| [e[:local_p1].x, e[:local_p2].x].max }.max
+        
+        left_has_perp = find_perpendicular_face_at_corner(face_data, all_faces_data,
+          {local_p1: Geom::Point3d.new(min_x, actual_min_y, 0), local_p2: Geom::Point3d.new(min_x, actual_min_y, 0)}, face_transform)
+        right_has_perp = find_perpendicular_face_at_corner(face_data, all_faces_data,
+          {local_p1: Geom::Point3d.new(max_x, actual_min_y, 0), local_p2: Geom::Point3d.new(max_x, actual_min_y, 0)}, face_transform)
+        
+        rail_end_y = actual_min_y - joint_width_su
+        rail_start_y = rail_end_y - bottom_rail_thickness_su
+        
+        p1 = Geom::Point3d.new(min_x, rail_start_y, 0)
+        p2 = Geom::Point3d.new(max_x, rail_start_y, 0)
+        p3 = Geom::Point3d.new(max_x, rail_end_y, 0)
+        p4 = Geom::Point3d.new(min_x, rail_end_y, 0)
+        
+        if left_has_perp
+          p1 = Geom::Point3d.new(min_x - bottom_rail_thickness_su, rail_start_y, 0)
+          p4 = Geom::Point3d.new(min_x - bottom_rail_thickness_su, rail_end_y, 0)
+        end
+        if right_has_perp
+          p2 = Geom::Point3d.new(max_x + bottom_rail_thickness_su, rail_start_y, 0)
+          p3 = Geom::Point3d.new(max_x + bottom_rail_thickness_su, rail_end_y, 0)
+        end
+        
+        rail_group = main_group.entities.add_group
+        rail_face = rail_group.entities.add_face([p1, p2, p3, p4].map { |pt| pt.transform(face_transform) }) rescue nil
+        if rail_face
+          rail_face.material = rail_material
+          rail_face.back_material = rail_material
+          pushpull_dist = rail_face.normal.samedirection?(original_normal) ? -bottom_rail_depth_su : bottom_rail_depth_su
+          rail_face.pushpull(pushpull_dist) rescue nil
+          created_rails << rail_group.to_component
+        else
+          rail_group.erase!
+        end
+      end
     end
 
     if @@enable_left_rail
-      left_rail_group = main_group.entities.add_group
-      left_rail_group.name = "Left_Rail_Face_#{face_index + 1}"
-
-      rail_segments = []
-      if @@split_rails
-        rail_segments << { start: stone_min_y_for_rails, end: stone_max_y_for_rails }
-      else
-        rail_segments << { start: actual_local_bounds.min.y, end: actual_local_bounds.max.y }
-      end
-
-      rail_segments.each do |segment|
-        rail_start_y = segment[:start]
-        rail_end_y = segment[:end]
-        next if (rail_end_y - rail_start_y).abs < 0.001
-
-        rail_x_pos = actual_local_bounds.min.x - left_rail_thickness_su
-
-        local_rail_points = [
-          Geom::Point3d.new(rail_x_pos, rail_start_y, 0),
-          Geom::Point3d.new(rail_x_pos + left_rail_thickness_su, rail_start_y, 0),
-          Geom::Point3d.new(rail_x_pos + left_rail_thickness_su, rail_end_y, 0),
-          Geom::Point3d.new(rail_x_pos, rail_end_y, 0)
-        ]
+      # Left rail: Find VERTICAL edges (top/bottom orientation) at minimum X
+      # These are edges that run up-down at the left of the layout
+      left_edges = classified_edges.select { |e| 
+        # Edge must be at the left X position
+        (e[:local_p1].x - actual_min_x).abs < 0.5 || (e[:local_p2].x - actual_min_x).abs < 0.5
+      }
+      puts "[RAILS] Left rail: found #{left_edges.length} edges at x=#{actual_min_x.round(2)}"
+      left_edges.each do |edge_data|
+        rail_end_x = actual_min_x - joint_width_su
+        rail_pts = create_mitered_rail_points(edge_data, rail_end_x - left_rail_thickness_su, rail_end_x, left_rail_thickness_su, local_bounds, false)
         
-        world_rail_points = local_rail_points.map { |pt| pt.transform(face_transform) }
-        
-        begin
-          rail_face = left_rail_group.entities.add_face(world_rail_points)
-          if rail_face
-            rail_face.material = rail_material
-            rail_face.back_material = rail_material
-            
-            rail_normal = rail_face.normal
-            if rail_normal.samedirection?(original_normal)
-              pushpull_distance = -left_rail_depth_su
-            else
-              pushpull_distance = left_rail_depth_su
-            end
-            rail_face.pushpull(pushpull_distance)
-          end
-        rescue => e
+        rail_group = main_group.entities.add_group
+        rail_face = rail_group.entities.add_face(rail_pts.map { |pt| pt.transform(face_transform) }) rescue nil
+        if rail_face
+          rail_face.material = rail_material
+          rail_face.back_material = rail_material
+          pushpull_dist = rail_face.normal.samedirection?(original_normal) ? -left_rail_depth_su : left_rail_depth_su
+          rail_face.pushpull(pushpull_dist) rescue nil
+          created_rails << rail_group.to_component
+        else
+          rail_group.erase!
         end
       end
-      
-      left_rail_comp = left_rail_group.to_component
-      left_rail_comp.name = "Left_Rail_Face_#{face_index + 1}"
-      created_rails << left_rail_comp
     end
 
     if @@enable_right_rail
-      right_rail_group = main_group.entities.add_group
-      right_rail_group.name = "Right_Rail_Face_#{face_index + 1}"
-
-      rail_segments = []
-      if @@split_rails
-        rail_segments << { start: stone_min_y_for_rails, end: stone_max_y_for_rails }
-      else
-        rail_segments << { start: actual_local_bounds.min.y, end: actual_local_bounds.max.y }
-      end
-
-      rail_segments.each do |segment|
-        rail_start_y = segment[:start]
-        rail_end_y = segment[:end]
-        next if (rail_end_y - rail_start_y).abs < 0.001
-
-        rail_x_pos = actual_local_bounds.max.x
-
-        local_rail_points = [
-          Geom::Point3d.new(rail_x_pos, rail_start_y, 0),
-          Geom::Point3d.new(rail_x_pos + right_rail_thickness_su, rail_start_y, 0),
-          Geom::Point3d.new(rail_x_pos + right_rail_thickness_su, rail_end_y, 0),
-          Geom::Point3d.new(rail_x_pos, rail_end_y, 0)
-        ]
+      # Right rail: Find VERTICAL edges (top/bottom orientation) at maximum X
+      # These are edges that run up-down at the right of the layout
+      right_edges = classified_edges.select { |e| 
+        # Edge must be at the right X position
+        (e[:local_p1].x - actual_max_x).abs < 0.5 || (e[:local_p2].x - actual_max_x).abs < 0.5
+      }
+      puts "[RAILS] Right rail: found #{right_edges.length} edges at x=#{actual_max_x.round(2)}"
+      right_edges.each do |edge_data|
+        rail_start_x = actual_max_x + joint_width_su
+        rail_pts = create_mitered_rail_points(edge_data, rail_start_x, rail_start_x + right_rail_thickness_su, right_rail_thickness_su, local_bounds, false)
         
-        world_rail_points = local_rail_points.map { |pt| pt.transform(face_transform) }
-        
-        begin
-          rail_face = right_rail_group.entities.add_face(world_rail_points)
-          if rail_face
-            rail_face.material = rail_material
-            rail_face.back_material = rail_material
-            
-            rail_normal = rail_face.normal
-            if rail_normal.samedirection?(original_normal)
-              pushpull_distance = -right_rail_depth_su
-            else
-              pushpull_distance = right_rail_depth_su
-            end
-            rail_face.pushpull(pushpull_distance)
-          end
-        rescue => e
+        rail_group = main_group.entities.add_group
+        rail_face = rail_group.entities.add_face(rail_pts.map { |pt| pt.transform(face_transform) }) rescue nil
+        if rail_face
+          rail_face.material = rail_material
+          rail_face.back_material = rail_material
+          pushpull_dist = rail_face.normal.samedirection?(original_normal) ? -right_rail_depth_su : right_rail_depth_su
+          rail_face.pushpull(pushpull_dist) rescue nil
+          created_rails << rail_group.to_component
+        else
+          rail_group.erase!
         end
       end
-      
-      right_rail_comp = right_rail_group.to_component
-      right_rail_comp.name = "Right_Rail_Face_#{face_index + 1}"
-      created_rails << right_rail_comp
     end
 
-    return created_rails
+    created_rails.empty? ? nil : created_rails
   end
 
 end

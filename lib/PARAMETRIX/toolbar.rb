@@ -1,15 +1,10 @@
 if !defined?(@parametrics_toolbar_loaded) || @parametrics_toolbar_loaded.nil?
   begin
-    if defined?(PARAMETRIX)
+    if defined?(PARAMETRIX) && defined?(PARAMETRIX.method(:start_layout_process))
       toolbar = UI::Toolbar.new "PARAMETRIX"
       
       cmd = UI::Command.new("PARAMETRIX Layout Generator") {
-        begin
-          PARAMETRIX.start_layout_process
-        rescue => e
-          UI.messagebox("Error: #{e.message}")
-          puts "[PARAMETRIX] Error details: #{e.backtrace.join('\n')}"
-        end
+        PARAMETRIX.start_layout_process
       }
       
       cmd.menu_text = "PARAMETRIX Layout Generator"
@@ -75,7 +70,8 @@ if !defined?(@parametrics_toolbar_loaded) || @parametrics_toolbar_loaded.nil?
       puts "PARAMETRIX module not loaded, skipping toolbar creation"
     end
   rescue => e
-    puts "Error creating toolbar: #{e.message}"
+    puts "[PARAMETRIX] Error creating toolbar: #{e.message}"
+    puts e.backtrace.first(5).join("\n")
   end
 
   @parametrics_toolbar_loaded = true

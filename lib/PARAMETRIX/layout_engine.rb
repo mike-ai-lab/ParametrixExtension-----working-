@@ -268,9 +268,28 @@ module PARAMETRIX
     end
     
     if !is_preview
-      # OOB METHOD: Trim 2D faces FIRST
-      trimmed_result = PARAMETRIX_TRIMMING_V4.boolean2d_exact(face_group, face, face_matrix)
-      face_group = trimmed_result if trimmed_result
+      # Analyze face geometry
+      face_has_openings = face.loops.length > 1
+      has_edge_opening = face.loops.length == 1 && vertex_count > 4
+      should_preserve = @@preserve_corners && total_faces > 1 && !has_edge_opening
+      
+      puts "[PARAMETRIX] Face #{face_index + 1} analysis: vertices=#{vertex_count}, loops=#{face.loops.length}, edge_opening=#{has_edge_opening}, preserve=#{should_preserve}"
+      
+      # Stage 1: Handle openings if present
+      if face_has_openings
+        trimmed_result = PARAMETRIX_TRIMMING_V4.trim_openings_only(face_group, face, face_matrix)
+        face_group = trimmed_result if trimmed_result
+        puts "[PARAMETRIX] Face #{face_index + 1}: Openings trimmed (#{face.loops.length - 1} holes)"
+      end
+      
+      # Stage 2: Boundary trimming - preserve boundaries except for edge openings
+      if should_preserve
+        puts "[PARAMETRIX] Face #{face_index + 1}: Boundary preserved for corner connection"
+      else
+        trimmed_result = PARAMETRIX_TRIMMING_V4.boolean2d_exact(face_group, face, face_matrix)
+        face_group = trimmed_result if trimmed_result
+        puts "[PARAMETRIX] Face #{face_index + 1}: Boundary trimmed#{has_edge_opening ? ' (edge opening)' : ''}"
+      end
 
       # THEN extrude trimmed 2D faces to 3D
       if face_group.is_a?(Sketchup::ComponentInstance)
@@ -279,32 +298,16 @@ module PARAMETRIX
         extrude_entities = face_group.entities
       end
       
-      # Recalculate rail positions AND bounds from TRIMMED faces
+      # Recalculate stone bounds AND transform from TRIMMED faces for rail positioning
       stone_min_y_for_rails = Float::INFINITY
       stone_max_y_for_rails = -Float::INFINITY
-      stone_min_x = Float::INFINITY
-      stone_max_x = -Float::INFINITY
-      top_row_joint_positions = []
-      bottom_row_joint_positions = []
+      inv_transform = face_transform.inverse
       
       extrude_entities.grep(Sketchup::Face).each do |f|
-        # Update rail bounds from trimmed geometry
         f.vertices.each do |v|
-          y = v.position.y
-          x = v.position.x
-          stone_min_y_for_rails = [stone_min_y_for_rails, y].min
-          stone_max_y_for_rails = [stone_max_y_for_rails, y].max
-          stone_min_x = [stone_min_x, x].min
-          stone_max_x = [stone_max_x, x].max
-        end
-        
-        # Track joint positions
-        bounds = f.bounds
-        if (bounds.max.y - stone_max_y_for_rails).abs < 0.01
-          top_row_joint_positions << { start: bounds.min.x, end: bounds.max.x }
-        end
-        if (bounds.min.y - stone_min_y_for_rails).abs < 0.01
-          bottom_row_joint_positions << { start: bounds.min.x, end: bounds.max.x }
+          local_pt = v.position.transform(inv_transform)
+          stone_min_y_for_rails = [stone_min_y_for_rails, local_pt.y].min
+          stone_max_y_for_rails = [stone_max_y_for_rails, local_pt.y].max
         end
       end
       
@@ -319,12 +322,7 @@ module PARAMETRIX
           f.pushpull(pushpull_distance)
         end
       end
-      puts "[PARAMETRIX] 3D extrusion completed. Rails: Y[#{stone_min_y_for_rails.round(2)}..#{stone_max_y_for_rails.round(2)}], X[#{stone_min_x.round(2)}..#{stone_max_x.round(2)}]"
-      
-      # Update local_bounds in OUTER scope for rails
-      local_bounds = Geom::BoundingBox.new
-      local_bounds.add(Geom::Point3d.new(stone_min_x, stone_min_y_for_rails, 0))
-      local_bounds.add(Geom::Point3d.new(stone_max_x, stone_max_y_for_rails, 0))
+      puts "[PARAMETRIX] 3D extrusion completed after 2D trimming (OOB method)"
     else
       # Preview: extrude immediately for visualization
       face_group.entities.grep(Sketchup::Face).each do |f|
@@ -343,17 +341,9 @@ module PARAMETRIX
       end
     end
     
-    # Debug: Check what bounds are being passed to rails
-    puts "[PARAMETRIX] Rails will use bounds: X[#{local_bounds.min.x.round(2)}..#{local_bounds.max.x.round(2)}], Y[#{local_bounds.min.y.round(2)}..#{local_bounds.max.y.round(2)}]"
-    
     # Create rails in both preview and final mode
-    # TODO: Rails should follow face edges, not just be rectangles
-    # For now, skip rails to avoid incorrect placement
-    # rail_material = materials.length > 1 ? materials[1] : materials[0]
-    # top_row_joint_positions.sort_by! { |p| p[:start] }
-    # bottom_row_joint_positions.sort_by! { |p| p[:start] }
-    # rails_group = create_rails_for_face(face_data, main_group, rail_material, unit_conversion, face_index, cavity_distance_su, [face_data], local_bounds, face_transform, original_normal, single_row_mode, stone_min_y_for_rails, stone_max_y_for_rails, joint_width_su, top_row_joint_positions, bottom_row_joint_positions)
-    rails_group = nil
+    rail_material = materials.length > 1 ? materials[1] : materials[0]
+    rails_group = create_rails_for_face(face_data, main_group, face_group, rail_material, unit_conversion, face_index, cavity_distance_su, [face_data], local_bounds, face_transform, original_normal, single_row_mode, stone_min_y_for_rails, stone_max_y_for_rails, joint_width_su)
 
     unit_name = get_effective_unit
 
@@ -378,6 +368,10 @@ module PARAMETRIX
         puts "[PARAMETRIX] Creating UNIFIED layout..."
         remove_preview
       end
+
+      # Disable trimming for multi-face corner connections
+      @@global_has_openings = false
+      puts "[PARAMETRIX] Multi-face mode: preserve_corners=#{@@preserve_corners}"
 
       unit_conversion = get_effective_unit_conversion
       unit_name = get_effective_unit
