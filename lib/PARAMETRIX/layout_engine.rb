@@ -270,25 +270,34 @@ module PARAMETRIX
     if !is_preview
       # Analyze face geometry
       face_has_openings = face.loops.length > 1
-      has_edge_opening = face.loops.length == 1 && vertex_count > 4
-      should_preserve = @@preserve_corners && total_faces > 1 && !has_edge_opening
+      is_single_face = total_faces == 1
+      should_preserve_boundary = @@preserve_corners && total_faces > 1
       
-      puts "[PARAMETRIX] Face #{face_index + 1} analysis: vertices=#{vertex_count}, loops=#{face.loops.length}, edge_opening=#{has_edge_opening}, preserve=#{should_preserve}"
+      puts "[PARAMETRIX] Face #{face_index + 1} analysis: vertices=#{vertex_count}, loops=#{face.loops.length}, single=#{is_single_face}, preserve=#{should_preserve_boundary}"
       
-      # Stage 1: Handle openings if present
-      if face_has_openings
-        trimmed_result = PARAMETRIX_TRIMMING_V4.trim_openings_only(face_group, face, face_matrix)
-        face_group = trimmed_result if trimmed_result
-        puts "[PARAMETRIX] Face #{face_index + 1}: Openings trimmed (#{face.loops.length - 1} holes)"
-      end
-      
-      # Stage 2: Boundary trimming - preserve boundaries except for edge openings
-      if should_preserve
-        puts "[PARAMETRIX] Face #{face_index + 1}: Boundary preserved for corner connection"
+      # Stage 1 & 2: Handle openings and boundary trimming
+      if should_preserve_boundary
+        # Multi-face mode: trim openings AND boundary (but preserve corners via proper trimming)
+        if face_has_openings
+          trimmed_result = PARAMETRIX_TRIMMING_V4.trim_openings_only(face_group, face, face_matrix, true)
+          face_group = trimmed_result if trimmed_result
+          puts "[PARAMETRIX] Face #{face_index + 1}: Openings and boundary trimmed (multi-face)"
+        else
+          # No openings, but still need boundary trim
+          trimmed_result = PARAMETRIX_TRIMMING_V4.boolean2d_exact(face_group, face, face_matrix)
+          face_group = trimmed_result if trimmed_result
+          puts "[PARAMETRIX] Face #{face_index + 1}: Boundary trimmed (multi-face, no openings)"
+        end
       else
+        # Single face mode: standard two-stage trimming
+        if face_has_openings
+          trimmed_result = PARAMETRIX_TRIMMING_V4.trim_openings_only(face_group, face, face_matrix, false)
+          face_group = trimmed_result if trimmed_result
+          puts "[PARAMETRIX] Face #{face_index + 1}: Openings trimmed (#{face.loops.length - 1} holes)"
+        end
         trimmed_result = PARAMETRIX_TRIMMING_V4.boolean2d_exact(face_group, face, face_matrix)
         face_group = trimmed_result if trimmed_result
-        puts "[PARAMETRIX] Face #{face_index + 1}: Boundary trimmed#{has_edge_opening ? ' (edge opening)' : ''}"
+        puts "[PARAMETRIX] Face #{face_index + 1}: Boundary trimmed (single face)"
       end
 
       # THEN extrude trimmed 2D faces to 3D

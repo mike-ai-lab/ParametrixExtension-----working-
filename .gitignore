@@ -1,0 +1,54 @@
+# Private keys and secrets
+*.pem
+.env
+private_key.pem
+public_key.pem
+
+# Development and testing files
+RELOAD*.rb
+reload.rb
+force_reload.rb
+test_*.rb
+*_test.rb
+geometry_diagnostic.rb
+restore_licensing.rb
+verify_trimming_visual.rb
+
+# Chat and documentation artifacts
+chat_history.txt
+console.txt
+reviews.txt
+chatupdate.md
+summay_purposes_q-dev-chat-2025-12-12.md
+BUGFIX_SUMMARY.md
+SOLUTION_SUMMARY.md
+deploy-complete.md
+
+# Build artifacts
+*.bat
+parametrix_engine_mock.bat
+
+# Development directories
+dev_dir/
+cpp_prototype/
+.qodo/
+
+# Node modules and dependencies
+node_modules/
+package-lock.json
+
+# Temporary files
+.temp/
+*.tmp
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
